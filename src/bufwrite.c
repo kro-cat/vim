@@ -1796,7 +1796,8 @@ buf_write(
 	else
 	{
 #ifdef HAVE_FTRUNCATE
-# define TRUNC_ON_OPEN 0
+// Workaround for issue GNOME/gvfs#249
+# define TRUNC_ON_OPEN O_APPEND
 #else
 # define TRUNC_ON_OPEN O_TRUNC
 #endif

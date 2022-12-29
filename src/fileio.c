@@ -475,7 +475,10 @@ readfile(
 #else
 	if (!newfile
 		|| readonlymode
-		|| (fd = mch_open((char *)fname, O_RDWR | O_EXTRA, 0)) < 0)
+		// set O_APPEND to workaround GNOME/gvfs#249 even if we're not
+		// writing to the file at this time.
+		|| (fd = mch_open((char *)fname, O_RDWR | O_EXTRA | O_APPEND, 0))
+									    < 0)
 	{
 	    file_readonly = TRUE;
 	    // try to open ro

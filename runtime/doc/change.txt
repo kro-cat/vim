@@ -1,4 +1,4 @@
-*change.txt*    For Vim version 9.0.  Last change: 2022 Nov 20
+*change.txt*    For Vim version 9.1.  Last change: 2024 May 18
 
 
 		  VIM REFERENCE MANUAL    by Bram Moolenaar
@@ -210,6 +210,7 @@ gR			Enter Virtual Replace mode: Each character you type
 
 							*v_r*
 {Visual}r{char}		Replace all selected characters by {char}.
+			CTRL-C will be inserted literally.
 
 							*v_C*
 {Visual}["x]C		Delete the highlighted lines [into register x] and
@@ -296,7 +297,9 @@ gr{char}		Replace the virtual characters under the cursor with
 			{char}.  This replaces in screen space, not file
 			space.  See |gR| and |Virtual-Replace-mode| for more
 			details.  As with |r| a count may be given.
-			{char} can be entered like with |r|.
+			{char} can be entered like with |r|, but characters
+			that have a special meaning in Insert mode, such as
+			most CTRL-keys, cannot be used.
 
 						*digraph-arg*
 The argument for Normal mode commands like |r| and |t| is a single character.
@@ -449,9 +452,18 @@ octal number.
 Note that when 'nrformats' includes "octal", decimal numbers with leading
 zeros cause mistakes, because they can be confused with octal numbers.
 
-Note similarly, when 'nrformats' includes "bin", binary numbers with a leading
-'0x' or '0X' can be interpreted as hexadecimal rather than binary since '0b'
-are valid hexadecimal digits.
+Note similarly, when 'nrformats' includes both "bin" and "hex", binary numbers
+with a leading '0x' or '0X' can be interpreted as hexadecimal rather than
+binary since '0b' are valid hexadecimal digits.  CTRL-A on "0x0b11" results in
+"0x0b12", not "0x0b100".
+When 'nrformats' includes "bin" and doesn't include "hex", CTRL-A on "0b11" in
+"0x0b11" results in "0x0b100".
+
+When the number under the cursor is too big to fit into 32 or 64 bit
+(depending on how Vim was build), it will be rounded off to the nearest number
+that can be represented, and the addition/subtraction is skipped.  E.g. with
+64 bit support using CTRL-X on 18446744073709551616 results in
+18446744073709551615.  Same for larger numbers, such as 18446744073709551618.
 
 The CTRL-A command is very useful in a macro.  Example: Use the following
 steps to make a numbered list.
@@ -507,7 +519,7 @@ SHIFTING LINES LEFT OR RIGHT				*shift-left-right*
 			lines to [indent] (default 0).
 
 							*:>*
-:[range]> [flags]	Shift {count} [range] lines one 'shiftwidth' right.
+:[range]> [flags]	Shift [range] lines one 'shiftwidth' right.
 			Repeat '>' for shifting multiple 'shiftwidth's.
 			See |ex-flags| for [flags].
 
@@ -611,7 +623,8 @@ Vim uses temporary files for filtering, generating diffs and also for
 tempname().  For Unix, the file will be in a private directory (only
 accessible by the current user) to avoid security problems (e.g., a symlink
 attack or other people reading your file).  When Vim exits the directory and
-all files in it are deleted.  When Vim has the setuid bit set this may cause
+all files in it are deleted (only on Unix, on other systems you will have to
+clean up yourself).  When Vim has the setuid bit set this may cause
 problems, the temp file is owned by the setuid user but the filter command
 probably runs as the original user.
 Directory for temporary files is created in the first of these directories
@@ -635,9 +648,9 @@ For other systems the tmpnam() library function is used.
 			current line only.  When [count] is given, replace in
 			[count] lines, starting with the last line in [range].
 			When [range] is omitted start in the current line.
-							*E939*
-			[count] must be a positive number.  Also see
-			|cmdline-ranges|.
+							*E939* *E1510*
+			[count] must be a positive number (max 2147483647)
+			Also see |cmdline-ranges|.
 
 			See |:s_flags| for [flags].
 			The delimiter doesn't need to be /, see
@@ -1033,7 +1046,7 @@ inside of strings can change!  Also see 'softtabstop' option. >
 <			to display registers '1' and 'a'.  Spaces are allowed
 			in {arg}.
 
-							*:di* *:display*
+							*:di* *:dis* *:display*
 :di[splay] [arg]	Same as :registers.
 
 							*y* *yank*
@@ -1333,8 +1346,8 @@ expression (like with the "/" command).
 The expression must evaluate to a String.  A Number is always automatically
 converted to a String.  For the "p" and ":put" command, if the result is a
 Float it's converted into a String.  If the result is a List each element is
-turned into a String and used as a line.  A Dictionary or FuncRef results in
-an error message (use string() to convert).
+turned into a String and used as a line.  A Dictionary is converted into a
+String.  A Funcref results in an error message (use string() to convert).
 
 If the "= register is used for the "p" command, the String is split up at <NL>
 characters.  If the String ends in a <NL>, it is regarded as a linewise

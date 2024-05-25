@@ -17,9 +17,8 @@
  * ScreenLines[off]  Contains a copy of the whole screen, as it is currently
  *		     displayed (excluding text written by external commands).
  * ScreenAttrs[off]  Contains the associated attributes.
- * ScreenCols[off]   Contains the byte offset in the line. -1 means not
- *		     available (below last line), MAXCOL means after the end
- *		     of the line.
+ * ScreenCols[off]   Contains the virtual columns in the line. -1 means not
+ *		     available or before buffer text.
  *
  * LineOffset[row]   Contains the offset into ScreenLines*[], ScreenAttrs[]
  *		     and ScreenCols[] for each line.
@@ -94,20 +93,20 @@ conceal_cursor_line(win_T *wp)
     void
 conceal_check_cursor_line(int was_concealed)
 {
-    if (curwin->w_p_cole > 0 && conceal_cursor_line(curwin) != was_concealed)
-    {
-	int wcol = curwin->w_wcol;
+    if (curwin->w_p_cole <= 0 || conceal_cursor_line(curwin) == was_concealed)
+	return;
 
-	need_cursor_line_redraw = TRUE;
-	// Need to recompute cursor column, e.g., when starting Visual mode
-	// without concealing.
-	curs_columns(TRUE);
+    int wcol = curwin->w_wcol;
 
-	// When concealing now w_wcol will be computed wrong, keep the previous
-	// value, it will be updated in win_line().
-	if (!was_concealed)
-	    curwin->w_wcol = wcol;
-    }
+    need_cursor_line_redraw = TRUE;
+    // Need to recompute cursor column, e.g., when starting Visual mode
+    // without concealing.
+    curs_columns(TRUE);
+
+    // When concealing now w_wcol will be computed wrong, keep the previous
+    // value, it will be updated in win_line().
+    if (!was_concealed)
+	curwin->w_wcol = wcol;
 }
 #endif
 
@@ -379,7 +378,7 @@ char_needs_redraw(int off_from, int off_to, int cols)
  * Return the index in ScreenLines[] for the current screen line.
  */
     int
-screen_get_current_line_off()
+screen_get_current_line_off(void)
 {
     return (int)(current_ScreenLine - ScreenLines);
 }
@@ -452,6 +451,10 @@ skip_for_popup(int row, int col)
  * SLF_RIGHTLEFT    rightleft window:
  *    When TRUE and "clear_width" > 0, clear columns 0 to "endcol"
  *    When FALSE and "clear_width" > 0, clear columns "endcol" to "clear_width"
+ * SLF_INC_VCOL:
+ *    When FALSE, use "last_vcol" for ScreenCols[] of the columns to clear.
+ *    When TRUE, use an increasing sequence starting from "last_vcol + 1" for
+ *    ScreenCols[] of the columns to clear.
  */
     void
 screen_line(
@@ -460,6 +463,7 @@ screen_line(
 	int	coloff,
 	int	endcol,
 	int	clear_width,
+	colnr_T	last_vcol,
 	int	flags UNUSED)
 {
     unsigned	    off_from;
@@ -504,6 +508,8 @@ screen_line(
 	// Clear rest first, because it's left of the text.
 	if (clear_width > 0)
 	{
+	    int clear_start = col;
+
 	    while (col <= endcol && ScreenLines[off_to] == ' '
 		    && ScreenAttrs[off_to] == 0
 				  && (!enc_utf8 || ScreenLinesUC[off_to] == 0))
@@ -514,6 +520,10 @@ screen_line(
 	    if (col <= endcol)
 		screen_fill(row, row + 1, col + coloff,
 					    endcol + coloff + 1, ' ', ' ', 0);
+
+	    for (int i = endcol; i >= clear_start; i--)
+		ScreenCols[off_to + (i - col)] =
+		    (flags & SLF_INC_VCOL) ? ++last_vcol : last_vcol;
 	}
 	col = endcol + 1;
 	off_to = LineOffset[row] + col + coloff;
@@ -743,7 +753,7 @@ screen_line(
 
 	ScreenCols[off_to] = ScreenCols[off_from];
 	if (char_cells == 2)
-	    ScreenCols[off_to + 1] = ScreenCols[off_from];
+	    ScreenCols[off_to + 1] = ScreenCols[off_from + 1];
 
 	off_to += char_cells;
 	off_from += char_cells;
@@ -775,7 +785,8 @@ screen_line(
 						  && ScreenAttrs[off_to] == 0
 				  && (!enc_utf8 || ScreenLinesUC[off_to] == 0))
 	{
-	    ScreenCols[off_to] = MAXCOL;
+	    ScreenCols[off_to] =
+			      (flags & SLF_INC_VCOL) ? ++last_vcol : last_vcol;
 	    ++off_to;
 	    ++col;
 	}
@@ -830,7 +841,8 @@ screen_line(
 								 ' ', ' ', 0);
 	    while (col < clear_width)
 	    {
-		ScreenCols[off_to++] = MAXCOL;
+		ScreenCols[off_to++]
+			    = (flags & SLF_INC_VCOL) ? ++last_vcol : last_vcol;
 		++col;
 	    }
 	}
@@ -906,14 +918,14 @@ draw_vsep_win(win_T *wp, int row)
     int		hl;
     int		c;
 
-    if (wp->w_vsep_width)
-    {
-	// draw the vertical separator right of this window
-	c = fillchar_vsep(&hl, wp);
-	screen_fill(W_WINROW(wp) + row, W_WINROW(wp) + wp->w_height,
-		W_ENDCOL(wp), W_ENDCOL(wp) + 1,
-		c, ' ', hl);
-    }
+    if (!wp->w_vsep_width)
+	return;
+
+    // draw the vertical separator right of this window
+    c = fillchar_vsep(&hl, wp);
+    screen_fill(W_WINROW(wp) + row, W_WINROW(wp) + wp->w_height,
+	    W_ENDCOL(wp), W_ENDCOL(wp) + 1,
+	    c, ' ', hl);
 }
 
 /*
@@ -960,36 +972,34 @@ get_keymap_str(
     if (wp->w_buffer->b_p_iminsert != B_IMODE_LMAP)
 	return FALSE;
 
-    {
 #ifdef FEAT_EVAL
-	buf_T	*old_curbuf = curbuf;
-	win_T	*old_curwin = curwin;
-	char_u	*s;
+    buf_T	*old_curbuf = curbuf;
+    win_T	*old_curwin = curwin;
+    char_u	*s;
 
-	curbuf = wp->w_buffer;
-	curwin = wp;
-	STRCPY(buf, "b:keymap_name");	// must be writable
-	++emsg_skip;
-	s = p = eval_to_string(buf, FALSE, FALSE);
-	--emsg_skip;
-	curbuf = old_curbuf;
-	curwin = old_curwin;
-	if (p == NULL || *p == NUL)
+    curbuf = wp->w_buffer;
+    curwin = wp;
+    STRCPY(buf, "b:keymap_name");	// must be writable
+    ++emsg_skip;
+    s = p = eval_to_string(buf, FALSE, FALSE);
+    --emsg_skip;
+    curbuf = old_curbuf;
+    curwin = old_curwin;
+    if (p == NULL || *p == NUL)
 #endif
-	{
+    {
 #ifdef FEAT_KEYMAP
-	    if (wp->w_buffer->b_kmap_state & KEYMAP_LOADED)
-		p = wp->w_buffer->b_p_keymap;
-	    else
+	if (wp->w_buffer->b_kmap_state & KEYMAP_LOADED)
+	    p = wp->w_buffer->b_p_keymap;
+	else
 #endif
-		p = (char_u *)"lang";
-	}
-	if (vim_snprintf((char *)buf, len, (char *)fmt, p) > len - 1)
-	    buf[0] = NUL;
-#ifdef FEAT_EVAL
-	vim_free(s);
-#endif
+	    p = (char_u *)"lang";
     }
+    if (vim_snprintf((char *)buf, len, (char *)fmt, p) > len - 1)
+	buf[0] = NUL;
+#ifdef FEAT_EVAL
+    vim_free(s);
+#endif
     return buf[0] != NUL;
 }
 
@@ -1045,7 +1055,8 @@ win_redr_custom(
     {
 	row = statusline_row(wp);
 	fillchar = fillchar_status(&attr, wp);
-	maxwidth = wp->w_width;
+	int in_status_line = wp->w_status_height != 0;
+	maxwidth = in_status_line ? wp->w_width : Columns;
 
 	if (draw_ruler)
 	{
@@ -1062,11 +1073,11 @@ win_redr_custom(
 		if (*stl++ != '(')
 		    stl = p_ruf;
 	    }
-	    col = ru_col - (Columns - wp->w_width);
-	    if (col < (wp->w_width + 1) / 2)
-		col = (wp->w_width + 1) / 2;
-	    maxwidth = wp->w_width - col;
-	    if (!wp->w_status_height)
+	    col = ru_col - (Columns - maxwidth);
+	    if (col < (maxwidth + 1) / 2)
+		col = (maxwidth + 1) / 2;
+	    maxwidth -= col;
+	    if (!in_status_line)
 	    {
 		row = Rows - 1;
 		--maxwidth;	// writing in last column may cause scrolling
@@ -1086,7 +1097,8 @@ win_redr_custom(
 		stl = p_stl;
 	}
 
-	col += wp->w_wincol;
+	if (in_status_line)
+	    col += wp->w_wincol;
     }
 
     if (maxwidth <= 0)
@@ -1199,8 +1211,9 @@ screen_putchar(int c, int row, int col, int attr)
 }
 
 /*
- * Get a single character directly from ScreenLines into "bytes[]".
- * Also return its attribute in *attrp;
+ * Get a single character directly from ScreenLines into "bytes", which must
+ * have a size of "MB_MAXBYTES + 1".
+ * If "attrp" is not NULL, return the character's attribute in "*attrp".
  */
     void
 screen_getbytes(int row, int col, char_u *bytes, int *attrp)
@@ -1208,26 +1221,27 @@ screen_getbytes(int row, int col, char_u *bytes, int *attrp)
     unsigned off;
 
     // safety check
-    if (ScreenLines != NULL && row < screen_Rows && col < screen_Columns)
-    {
-	off = LineOffset[row] + col;
-	*attrp = ScreenAttrs[off];
-	bytes[0] = ScreenLines[off];
-	bytes[1] = NUL;
+    if (ScreenLines == NULL || row >= screen_Rows || col >= screen_Columns)
+	return;
 
-	if (enc_utf8 && ScreenLinesUC[off] != 0)
-	    bytes[utfc_char2bytes(off, bytes)] = NUL;
-	else if (enc_dbcs == DBCS_JPNU && ScreenLines[off] == 0x8e)
-	{
-	    bytes[0] = ScreenLines[off];
-	    bytes[1] = ScreenLines2[off];
-	    bytes[2] = NUL;
-	}
-	else if (enc_dbcs && MB_BYTE2LEN(bytes[0]) > 1)
-	{
-	    bytes[1] = ScreenLines[off + 1];
-	    bytes[2] = NUL;
-	}
+    off = LineOffset[row] + col;
+    if (attrp != NULL)
+	*attrp = ScreenAttrs[off];
+    bytes[0] = ScreenLines[off];
+    bytes[1] = NUL;
+
+    if (enc_utf8 && ScreenLinesUC[off] != 0)
+	bytes[utfc_char2bytes(off, bytes)] = NUL;
+    else if (enc_dbcs == DBCS_JPNU && ScreenLines[off] == 0x8e)
+    {
+	bytes[0] = ScreenLines[off];
+	bytes[1] = ScreenLines2[off];
+	bytes[2] = NUL;
+    }
+    else if (enc_dbcs && MB_BYTE2LEN(bytes[0]) > 1)
+    {
+	bytes[1] = ScreenLines[off + 1];
+	bytes[2] = NUL;
     }
 }
 
@@ -1538,12 +1552,12 @@ screen_puts_len(
     void
 start_search_hl(void)
 {
-    if (p_hls && !no_hlsearch)
-    {
-	end_search_hl();  // just in case it wasn't called before
-	last_pat_prog(&screen_search_hl.rm);
-	screen_search_hl.attr = HL_ATTR(HLF_L);
-    }
+    if (!p_hls || no_hlsearch)
+	return;
+
+    end_search_hl();  // just in case it wasn't called before
+    last_pat_prog(&screen_search_hl.rm);
+    screen_search_hl.attr = HL_ATTR(HLF_L);
 }
 
 /*
@@ -1552,11 +1566,11 @@ start_search_hl(void)
     void
 end_search_hl(void)
 {
-    if (screen_search_hl.rm.regprog != NULL)
-    {
-	vim_regfree(screen_search_hl.rm.regprog);
-	screen_search_hl.rm.regprog = NULL;
-    }
+    if (screen_search_hl.rm.regprog == NULL)
+	return;
+
+    vim_regfree(screen_search_hl.rm.regprog);
+    screen_search_hl.rm.regprog = NULL;
 }
 #endif
 
@@ -1566,153 +1580,154 @@ screen_start_highlight(int attr)
     attrentry_T *aep = NULL;
 
     screen_attr = attr;
-    if (full_screen
+    if (!full_screen
 #ifdef MSWIN
-		    && termcap_active
+	    || !termcap_active
 #endif
-				       )
-    {
-#ifdef FEAT_GUI
-	if (gui.in_use)
-	{
-	    char	buf[20];
+       )
+	return;
 
-	    // The GUI handles this internally.
-	    sprintf(buf, "\033|%dh", attr);
-	    OUT_STR(buf);
+#ifdef FEAT_GUI
+    if (gui.in_use)
+    {
+	char	buf[20];
+
+	// The GUI handles this internally.
+	sprintf(buf, "\033|%dh", attr);
+	OUT_STR(buf);
+	return;
+    }
+#endif
+
+    if (attr > HL_ALL)				// special HL attr.
+    {
+	if (IS_CTERM)
+	    aep = syn_cterm_attr2entry(attr);
+	else
+	    aep = syn_term_attr2entry(attr);
+	if (aep == NULL)	    // did ":syntax clear"
+	    attr = 0;
+	else
+	    attr = aep->ae_attr;
+    }
+#if defined(FEAT_VTP) && defined(FEAT_TERMGUICOLORS)
+    if (use_vtp())
+    {
+	guicolor_T  defguifg, defguibg;
+	int	    defctermfg, defctermbg;
+
+	// If FG and BG are unset, the color is undefined when
+	// BOLD+INVERSE. Use Normal as the default value.
+	get_default_console_color(&defctermfg, &defctermbg, &defguifg,
+		&defguibg);
+
+	if (p_tgc)
+	{
+	    if (aep == NULL || COLOR_INVALID(aep->ae_u.cterm.fg_rgb))
+		term_fg_rgb_color(defguifg);
+	    if (aep == NULL || COLOR_INVALID(aep->ae_u.cterm.bg_rgb))
+		term_bg_rgb_color(defguibg);
+	}
+	else if (t_colors >= 256)
+	{
+	    if (aep == NULL || aep->ae_u.cterm.fg_color == 0)
+		term_fg_color(defctermfg);
+	    if (aep == NULL || aep->ae_u.cterm.bg_color == 0)
+		term_bg_color(defctermbg);
+	}
+    }
+#endif
+    if ((attr & HL_BOLD) && *T_MD != NUL)	// bold
+	out_str(T_MD);
+    else if (aep != NULL && cterm_normal_fg_bold && (
+#ifdef FEAT_TERMGUICOLORS
+		p_tgc && aep->ae_u.cterm.fg_rgb != CTERMCOLOR
+		? aep->ae_u.cterm.fg_rgb != INVALCOLOR
+		:
+#endif
+		t_colors > 1 && aep->ae_u.cterm.fg_color))
+	// If the Normal FG color has BOLD attribute and the new HL
+	// has a FG color defined, clear BOLD.
+	out_str(T_ME);
+    if ((attr & HL_STANDOUT) && *T_SO != NUL)	// standout
+	out_str(T_SO);
+    if ((attr & HL_UNDERCURL) && *T_UCS != NUL) // undercurl
+	out_str(T_UCS);
+    if ((attr & HL_UNDERDOUBLE) && *T_USS != NUL) // double underline
+	out_str(T_USS);
+    if ((attr & HL_UNDERDOTTED) && *T_DS != NUL) // dotted underline
+	out_str(T_DS);
+    if ((attr & HL_UNDERDASHED) && *T_CDS != NUL) // dashed underline
+	out_str(T_CDS);
+    if (((attr & HL_UNDERLINE)	    // underline or undercurl, etc.
+		|| ((attr & HL_UNDERCURL) && *T_UCS == NUL)
+		|| ((attr & HL_UNDERDOUBLE) && *T_USS == NUL)
+		|| ((attr & HL_UNDERDOTTED) && *T_DS == NUL)
+		|| ((attr & HL_UNDERDASHED) && *T_CDS == NUL))
+	    && *T_US != NUL)
+	out_str(T_US);
+    if ((attr & HL_ITALIC) && *T_CZH != NUL)	// italic
+	out_str(T_CZH);
+    if ((attr & HL_INVERSE) && *T_MR != NUL)	// inverse (reverse)
+	out_str(T_MR);
+    if ((attr & HL_STRIKETHROUGH) && *T_STS != NUL)	// strike
+	out_str(T_STS);
+
+    /*
+     * Output the color or start string after bold etc., in case the
+     * bold etc. override the color setting.
+     */
+    if (aep != NULL)
+    {
+	if (aep->ae_u.cterm.font > 0 && aep->ae_u.cterm.font < 12)
+		term_font(aep->ae_u.cterm.font);
+#ifdef FEAT_TERMGUICOLORS
+	// When 'termguicolors' is set but fg or bg is unset,
+	// fall back to the cterm colors.   This helps for SpellBad,
+	// where the GUI uses a red undercurl.
+	if (p_tgc && aep->ae_u.cterm.fg_rgb != CTERMCOLOR)
+	{
+	    if (aep->ae_u.cterm.fg_rgb != INVALCOLOR)
+		term_fg_rgb_color(aep->ae_u.cterm.fg_rgb);
 	}
 	else
 #endif
+	    if (t_colors > 1)
+	    {
+		if (aep->ae_u.cterm.fg_color)
+		    term_fg_color(aep->ae_u.cterm.fg_color - 1);
+	    }
+#ifdef FEAT_TERMGUICOLORS
+	if (p_tgc && aep->ae_u.cterm.bg_rgb != CTERMCOLOR)
 	{
-	    if (attr > HL_ALL)				// special HL attr.
+	    if (aep->ae_u.cterm.bg_rgb != INVALCOLOR)
+		term_bg_rgb_color(aep->ae_u.cterm.bg_rgb);
+	}
+	else
+#endif
+	    if (t_colors > 1)
 	    {
-		if (IS_CTERM)
-		    aep = syn_cterm_attr2entry(attr);
-		else
-		    aep = syn_term_attr2entry(attr);
-		if (aep == NULL)	    // did ":syntax clear"
-		    attr = 0;
-		else
-		    attr = aep->ae_attr;
+		if (aep->ae_u.cterm.bg_color)
+		    term_bg_color(aep->ae_u.cterm.bg_color - 1);
 	    }
-#if defined(FEAT_VTP) && defined(FEAT_TERMGUICOLORS)
-	    if (use_vtp())
+#ifdef FEAT_TERMGUICOLORS
+	if (p_tgc && aep->ae_u.cterm.ul_rgb != CTERMCOLOR)
+	{
+	    if (aep->ae_u.cterm.ul_rgb != INVALCOLOR)
+		term_ul_rgb_color(aep->ae_u.cterm.ul_rgb);
+	}
+	else
+#endif
+	    if (t_colors > 1)
 	    {
-		guicolor_T  defguifg, defguibg;
-		int	    defctermfg, defctermbg;
-
-		// If FG and BG are unset, the color is undefined when
-		// BOLD+INVERSE. Use Normal as the default value.
-		get_default_console_color(&defctermfg, &defctermbg, &defguifg,
-								    &defguibg);
-
-		if (p_tgc)
-		{
-		    if (aep == NULL || COLOR_INVALID(aep->ae_u.cterm.fg_rgb))
-			term_fg_rgb_color(defguifg);
-		    if (aep == NULL || COLOR_INVALID(aep->ae_u.cterm.bg_rgb))
-			term_bg_rgb_color(defguibg);
-		}
-		else if (t_colors >= 256)
-		{
-		    if (aep == NULL || aep->ae_u.cterm.fg_color == 0)
-			term_fg_color(defctermfg);
-		    if (aep == NULL || aep->ae_u.cterm.bg_color == 0)
-			term_bg_color(defctermbg);
-		}
+		if (aep->ae_u.cterm.ul_color)
+		    term_ul_color(aep->ae_u.cterm.ul_color - 1);
 	    }
-#endif
-	    if ((attr & HL_BOLD) && *T_MD != NUL)	// bold
-		out_str(T_MD);
-	    else if (aep != NULL && cterm_normal_fg_bold && (
-#ifdef FEAT_TERMGUICOLORS
-			p_tgc && aep->ae_u.cterm.fg_rgb != CTERMCOLOR
-			  ? aep->ae_u.cterm.fg_rgb != INVALCOLOR
-			  :
-#endif
-			    t_colors > 1 && aep->ae_u.cterm.fg_color))
-		// If the Normal FG color has BOLD attribute and the new HL
-		// has a FG color defined, clear BOLD.
-		out_str(T_ME);
-	    if ((attr & HL_STANDOUT) && *T_SO != NUL)	// standout
-		out_str(T_SO);
-	    if ((attr & HL_UNDERCURL) && *T_UCS != NUL) // undercurl
-		out_str(T_UCS);
-	    if ((attr & HL_UNDERDOUBLE) && *T_USS != NUL) // double underline
-		out_str(T_USS);
-	    if ((attr & HL_UNDERDOTTED) && *T_DS != NUL) // dotted underline
-		out_str(T_DS);
-	    if ((attr & HL_UNDERDASHED) && *T_CDS != NUL) // dashed underline
-		out_str(T_CDS);
-	    if (((attr & HL_UNDERLINE)	    // underline or undercurl, etc.
-			|| ((attr & HL_UNDERCURL) && *T_UCS == NUL)
-			|| ((attr & HL_UNDERDOUBLE) && *T_USS == NUL)
-			|| ((attr & HL_UNDERDOTTED) && *T_DS == NUL)
-			|| ((attr & HL_UNDERDASHED) && *T_CDS == NUL))
-		    && *T_US != NUL)
-		out_str(T_US);
-	    if ((attr & HL_ITALIC) && *T_CZH != NUL)	// italic
-		out_str(T_CZH);
-	    if ((attr & HL_INVERSE) && *T_MR != NUL)	// inverse (reverse)
-		out_str(T_MR);
-	    if ((attr & HL_STRIKETHROUGH) && *T_STS != NUL)	// strike
-		out_str(T_STS);
 
-	    /*
-	     * Output the color or start string after bold etc., in case the
-	     * bold etc. override the color setting.
-	     */
-	    if (aep != NULL)
-	    {
-#ifdef FEAT_TERMGUICOLORS
-		// When 'termguicolors' is set but fg or bg is unset,
-		// fall back to the cterm colors.   This helps for SpellBad,
-		// where the GUI uses a red undercurl.
-		if (p_tgc && aep->ae_u.cterm.fg_rgb != CTERMCOLOR)
-		{
-		    if (aep->ae_u.cterm.fg_rgb != INVALCOLOR)
-			term_fg_rgb_color(aep->ae_u.cterm.fg_rgb);
-		}
-		else
-#endif
-		if (t_colors > 1)
-		{
-		    if (aep->ae_u.cterm.fg_color)
-			term_fg_color(aep->ae_u.cterm.fg_color - 1);
-		}
-#ifdef FEAT_TERMGUICOLORS
-		if (p_tgc && aep->ae_u.cterm.bg_rgb != CTERMCOLOR)
-		{
-		    if (aep->ae_u.cterm.bg_rgb != INVALCOLOR)
-			term_bg_rgb_color(aep->ae_u.cterm.bg_rgb);
-		}
-		else
-#endif
-		if (t_colors > 1)
-		{
-		    if (aep->ae_u.cterm.bg_color)
-			term_bg_color(aep->ae_u.cterm.bg_color - 1);
-		}
-#ifdef FEAT_TERMGUICOLORS
-		if (p_tgc && aep->ae_u.cterm.ul_rgb != CTERMCOLOR)
-		{
-		    if (aep->ae_u.cterm.ul_rgb != INVALCOLOR)
-			term_ul_rgb_color(aep->ae_u.cterm.ul_rgb);
-		}
-		else
-#endif
-		if (t_colors > 1)
-		{
-		    if (aep->ae_u.cterm.ul_color)
-			term_ul_color(aep->ae_u.cterm.ul_color - 1);
-		}
-
-		if (!IS_CTERM)
-		{
-		    if (aep->ae_u.term.start != NULL)
-			out_str(aep->ae_u.term.start);
-		}
-	    }
+	if (!IS_CTERM)
+	{
+	    if (aep->ae_u.term.start != NULL)
+		out_str(aep->ae_u.term.start);
 	}
     }
 }
@@ -1895,13 +1910,14 @@ screen_stop_highlight(void)
     void
 reset_cterm_colors(void)
 {
-    if (IS_CTERM)
-    {
-	// set Normal cterm colors
+    if (!IS_CTERM)
+	return;
+
+    // set Normal cterm colors
 #ifdef FEAT_TERMGUICOLORS
-	if (p_tgc ? (cterm_normal_fg_gui_color != INVALCOLOR
-		 || cterm_normal_bg_gui_color != INVALCOLOR)
-		: (cterm_normal_fg_color > 0 || cterm_normal_bg_color > 0))
+    if (p_tgc ? (cterm_normal_fg_gui_color != INVALCOLOR
+		|| cterm_normal_bg_gui_color != INVALCOLOR)
+	    : (cterm_normal_fg_color > 0 || cterm_normal_bg_color > 0))
 #else
 	if (cterm_normal_fg_color > 0 || cterm_normal_bg_color > 0)
 #endif
@@ -1909,11 +1925,10 @@ reset_cterm_colors(void)
 	    out_str(T_OP);
 	    screen_attr = -1;
 	}
-	if (cterm_normal_fg_bold)
-	{
-	    out_str(T_ME);
-	    screen_attr = -1;
-	}
+    if (cterm_normal_fg_bold)
+    {
+	out_str(T_ME);
+	screen_attr = -1;
     }
 }
 
@@ -1966,7 +1981,21 @@ screen_char(unsigned off, int row, int col)
     {
 	char_u	    buf[MB_MAXBYTES + 1];
 
-	if (utf_ambiguous_width(ScreenLinesUC[off]))
+	if (
+#ifdef FEAT_GUI
+	    !gui.in_use &&
+#endif
+	    get_cellwidth(ScreenLinesUC[off]) > 1
+	    )
+	{
+	    // If the width is set to 2 with setcellwidths()
+	    // clear the two screen cells. If the character is actually
+	    // single width it won't change the second cell.
+	    out_str((char_u *)"  ");
+	    term_windgoto(row, col);
+	    screen_cur_col = 9999;
+	}
+	else if (utf_ambiguous_width(ScreenLinesUC[off]))
 	{
 	    if (*p_ambw == 'd'
 #ifdef FEAT_GUI
@@ -2566,6 +2595,25 @@ give_up:
 	    new_LineOffset[new_row] = new_row * Columns;
 	    new_LineWraps[new_row] = FALSE;
 
+	    (void)vim_memset(new_ScreenLines + new_row * Columns,
+				  ' ', (size_t)Columns * sizeof(schar_T));
+	    if (enc_utf8)
+	    {
+		(void)vim_memset(new_ScreenLinesUC + new_row * Columns,
+				   0, (size_t)Columns * sizeof(u8char_T));
+		for (int i = 0; i < p_mco; ++i)
+		    (void)vim_memset(new_ScreenLinesC[i]
+						      + new_row * Columns,
+				   0, (size_t)Columns * sizeof(u8char_T));
+	    }
+	    if (enc_dbcs == DBCS_JPNU)
+		(void)vim_memset(new_ScreenLines2 + new_row * Columns,
+				   0, (size_t)Columns * sizeof(schar_T));
+	    (void)vim_memset(new_ScreenAttrs + new_row * Columns,
+				    0, (size_t)Columns * sizeof(sattr_T));
+	    (void)vim_memset(new_ScreenCols + new_row * Columns,
+				    0, (size_t)Columns * sizeof(colnr_T));
+
 	    /*
 	     * If the screen is not going to be cleared, copy as much as
 	     * possible from the old screen to the new one and clear the rest
@@ -2574,24 +2622,6 @@ give_up:
 	     */
 	    if (!doclear)
 	    {
-		(void)vim_memset(new_ScreenLines + new_row * Columns,
-				      ' ', (size_t)Columns * sizeof(schar_T));
-		if (enc_utf8)
-		{
-		    (void)vim_memset(new_ScreenLinesUC + new_row * Columns,
-				       0, (size_t)Columns * sizeof(u8char_T));
-		    for (int i = 0; i < p_mco; ++i)
-			(void)vim_memset(new_ScreenLinesC[i]
-							  + new_row * Columns,
-				       0, (size_t)Columns * sizeof(u8char_T));
-		}
-		if (enc_dbcs == DBCS_JPNU)
-		    (void)vim_memset(new_ScreenLines2 + new_row * Columns,
-				       0, (size_t)Columns * sizeof(schar_T));
-		(void)vim_memset(new_ScreenAttrs + new_row * Columns,
-					0, (size_t)Columns * sizeof(sattr_T));
-		(void)vim_memset(new_ScreenCols + new_row * Columns,
-					0, (size_t)Columns * sizeof(colnr_T));
 		old_row = new_row + (screen_Rows - Rows);
 		if (old_row >= 0 && ScreenLines != NULL)
 		{
@@ -2697,7 +2727,8 @@ give_up:
 #endif
 
     entered = FALSE;
-    --RedrawingDisabled;
+    if (RedrawingDisabled > 0)
+	--RedrawingDisabled;
 
     /*
      * Do not apply autocommands more than 3 times to avoid an endless loop
@@ -2954,223 +2985,223 @@ windgoto(int row, int col)
     // Can't use ScreenLines unless initialized
     if (ScreenLines == NULL)
 	return;
-    if (col != screen_cur_col || row != screen_cur_row)
-    {
-	// Check for valid position.
-	if (row < 0)	// window without text lines?
-	    row = 0;
-	if (row >= screen_Rows)
-	    row = screen_Rows - 1;
-	if (col >= screen_Columns)
-	    col = screen_Columns - 1;
+    if (col == screen_cur_col && row == screen_cur_row)
+	return;
 
-	// check if no cursor movement is allowed in highlight mode
-	if (screen_attr && *T_MS == NUL)
-	    noinvcurs = HIGHL_COST;
-	else
-	    noinvcurs = 0;
-	goto_cost = GOTO_COST + noinvcurs;
+    // Check for valid position.
+    if (row < 0)	// window without text lines?
+	row = 0;
+    if (row >= screen_Rows)
+	row = screen_Rows - 1;
+    if (col >= screen_Columns)
+	col = screen_Columns - 1;
+
+    // check if no cursor movement is allowed in highlight mode
+    if (screen_attr && *T_MS == NUL)
+	noinvcurs = HIGHL_COST;
+    else
+	noinvcurs = 0;
+    goto_cost = GOTO_COST + noinvcurs;
+
+    /*
+     * Plan how to do the positioning:
+     * 1. Use CR to move it to column 0, same row.
+     * 2. Use T_LE to move it a few columns to the left.
+     * 3. Use NL to move a few lines down, column 0.
+     * 4. Move a few columns to the right with T_ND or by writing chars.
+     *
+     * Don't do this if the cursor went beyond the last column, the cursor
+     * position is unknown then (some terminals wrap, some don't )
+     *
+     * First check if the highlighting attributes allow us to write
+     * characters to move the cursor to the right.
+     */
+    if (row >= screen_cur_row && screen_cur_col < Columns)
+    {
+	/*
+	 * If the cursor is in the same row, bigger col, we can use CR
+	 * or T_LE.
+	 */
+	bs = NULL;			    // init for GCC
+	attr = screen_attr;
+	if (row == screen_cur_row && col < screen_cur_col)
+	{
+	    // "le" is preferred over "bc", because "bc" is obsolete
+	    if (*T_LE)
+		bs = T_LE;		    // "cursor left"
+	    else
+		bs = T_BC;		    // "backspace character (old)
+	    if (*bs)
+		cost = (screen_cur_col - col) * (int)STRLEN(bs);
+	    else
+		cost = 999;
+	    if (col + 1 < cost)	    // using CR is less characters
+	    {
+		plan = PLAN_CR;
+		wouldbe_col = 0;
+		cost = 1;		    // CR is just one character
+	    }
+	    else
+	    {
+		plan = PLAN_LE;
+		wouldbe_col = col;
+	    }
+	    if (noinvcurs)		    // will stop highlighting
+	    {
+		cost += noinvcurs;
+		attr = 0;
+	    }
+	}
 
 	/*
-	 * Plan how to do the positioning:
-	 * 1. Use CR to move it to column 0, same row.
-	 * 2. Use T_LE to move it a few columns to the left.
-	 * 3. Use NL to move a few lines down, column 0.
-	 * 4. Move a few columns to the right with T_ND or by writing chars.
-	 *
-	 * Don't do this if the cursor went beyond the last column, the cursor
-	 * position is unknown then (some terminals wrap, some don't )
-	 *
-	 * First check if the highlighting attributes allow us to write
-	 * characters to move the cursor to the right.
+	 * If the cursor is above where we want to be, we can use CR LF.
 	 */
-	if (row >= screen_cur_row && screen_cur_col < Columns)
+	else if (row > screen_cur_row)
+	{
+	    plan = PLAN_NL;
+	    wouldbe_col = 0;
+	    cost = (row - screen_cur_row) * 2;  // CR LF
+	    if (noinvcurs)		    // will stop highlighting
+	    {
+		cost += noinvcurs;
+		attr = 0;
+	    }
+	}
+
+	/*
+	 * If the cursor is in the same row, smaller col, just use write.
+	 */
+	else
+	{
+	    plan = PLAN_WRITE;
+	    wouldbe_col = screen_cur_col;
+	    cost = 0;
+	}
+
+	/*
+	 * Check if any characters that need to be written have the
+	 * correct attributes.  Also avoid UTF-8 characters.
+	 */
+	i = col - wouldbe_col;
+	if (i > 0)
+	    cost += i;
+	if (cost < goto_cost && i > 0)
 	{
 	    /*
-	     * If the cursor is in the same row, bigger col, we can use CR
-	     * or T_LE.
+	     * Check if the attributes are correct without additionally
+	     * stopping highlighting.
 	     */
-	    bs = NULL;			    // init for GCC
-	    attr = screen_attr;
-	    if (row == screen_cur_row && col < screen_cur_col)
-	    {
-		// "le" is preferred over "bc", because "bc" is obsolete
-		if (*T_LE)
-		    bs = T_LE;		    // "cursor left"
-		else
-		    bs = T_BC;		    // "backspace character (old)
-		if (*bs)
-		    cost = (screen_cur_col - col) * (int)STRLEN(bs);
-		else
-		    cost = 999;
-		if (col + 1 < cost)	    // using CR is less characters
-		{
-		    plan = PLAN_CR;
-		    wouldbe_col = 0;
-		    cost = 1;		    // CR is just one character
-		}
-		else
-		{
-		    plan = PLAN_LE;
-		    wouldbe_col = col;
-		}
-		if (noinvcurs)		    // will stop highlighting
-		{
-		    cost += noinvcurs;
-		    attr = 0;
-		}
-	    }
-
-	    /*
-	     * If the cursor is above where we want to be, we can use CR LF.
-	     */
-	    else if (row > screen_cur_row)
-	    {
-		plan = PLAN_NL;
-		wouldbe_col = 0;
-		cost = (row - screen_cur_row) * 2;  // CR LF
-		if (noinvcurs)		    // will stop highlighting
-		{
-		    cost += noinvcurs;
-		    attr = 0;
-		}
-	    }
-
-	    /*
-	     * If the cursor is in the same row, smaller col, just use write.
-	     */
-	    else
-	    {
-		plan = PLAN_WRITE;
-		wouldbe_col = screen_cur_col;
-		cost = 0;
-	    }
-
-	    /*
-	     * Check if any characters that need to be written have the
-	     * correct attributes.  Also avoid UTF-8 characters.
-	     */
-	    i = col - wouldbe_col;
-	    if (i > 0)
-		cost += i;
-	    if (cost < goto_cost && i > 0)
+	    p = ScreenAttrs + LineOffset[row] + wouldbe_col;
+	    while (i && *p++ == attr)
+		--i;
+	    if (i != 0)
 	    {
 		/*
-		 * Check if the attributes are correct without additionally
-		 * stopping highlighting.
+		 * Try if it works when highlighting is stopped here.
 		 */
-		p = ScreenAttrs + LineOffset[row] + wouldbe_col;
-		while (i && *p++ == attr)
-		    --i;
+		if (*--p == 0)
+		{
+		    cost += noinvcurs;
+		    while (i && *p++ == 0)
+			--i;
+		}
 		if (i != 0)
-		{
-		    /*
-		     * Try if it works when highlighting is stopped here.
-		     */
-		    if (*--p == 0)
-		    {
-			cost += noinvcurs;
-			while (i && *p++ == 0)
-			    --i;
-		    }
-		    if (i != 0)
-			cost = 999;	// different attributes, don't do it
-		}
-		if (enc_utf8)
-		{
-		    // Don't use an UTF-8 char for positioning, it's slow.
-		    for (i = wouldbe_col; i < col; ++i)
-			if (ScreenLinesUC[LineOffset[row] + i] != 0)
-			{
-			    cost = 999;
-			    break;
-			}
-		}
+		    cost = 999;	// different attributes, don't do it
 	    }
-
-	    /*
-	     * We can do it without term_windgoto()!
-	     */
-	    if (cost < goto_cost)
+	    if (enc_utf8)
 	    {
-		if (plan == PLAN_LE)
-		{
-		    if (noinvcurs)
-			screen_stop_highlight();
-		    while (screen_cur_col > col)
+		// Don't use an UTF-8 char for positioning, it's slow.
+		for (i = wouldbe_col; i < col; ++i)
+		    if (ScreenLinesUC[LineOffset[row] + i] != 0)
 		    {
-			out_str(bs);
-			--screen_cur_col;
+			cost = 999;
+			break;
 		    }
-		}
-		else if (plan == PLAN_CR)
-		{
-		    if (noinvcurs)
-			screen_stop_highlight();
-		    out_char('\r');
-		    screen_cur_col = 0;
-		}
-		else if (plan == PLAN_NL)
-		{
-		    if (noinvcurs)
-			screen_stop_highlight();
-		    while (screen_cur_row < row)
-		    {
-			out_char('\n');
-			++screen_cur_row;
-		    }
-		    screen_cur_col = 0;
-		}
+	    }
+	}
 
-		i = col - screen_cur_col;
-		if (i > 0)
+	/*
+	 * We can do it without term_windgoto()!
+	 */
+	if (cost < goto_cost)
+	{
+	    if (plan == PLAN_LE)
+	    {
+		if (noinvcurs)
+		    screen_stop_highlight();
+		while (screen_cur_col > col)
 		{
-		    /*
-		     * Use cursor-right if it's one character only.  Avoids
-		     * removing a line of pixels from the last bold char, when
-		     * using the bold trick in the GUI.
-		     */
-		    if (T_ND[0] != NUL && T_ND[1] == NUL)
-		    {
-			while (i-- > 0)
-			    out_char(*T_ND);
-		    }
-		    else
-		    {
-			int	off;
+		    out_str(bs);
+		    --screen_cur_col;
+		}
+	    }
+	    else if (plan == PLAN_CR)
+	    {
+		if (noinvcurs)
+		    screen_stop_highlight();
+		out_char('\r');
+		screen_cur_col = 0;
+	    }
+	    else if (plan == PLAN_NL)
+	    {
+		if (noinvcurs)
+		    screen_stop_highlight();
+		while (screen_cur_row < row)
+		{
+		    out_char('\n');
+		    ++screen_cur_row;
+		}
+		screen_cur_col = 0;
+	    }
 
-			off = LineOffset[row] + screen_cur_col;
-			while (i-- > 0)
-			{
-			    if (ScreenAttrs[off] != screen_attr)
-				screen_stop_highlight();
-			    out_flush_check();
-			    out_char(ScreenLines[off]);
-			    if (enc_dbcs == DBCS_JPNU
-						  && ScreenLines[off] == 0x8e)
-				out_char(ScreenLines2[off]);
-			    ++off;
-			}
+	    i = col - screen_cur_col;
+	    if (i > 0)
+	    {
+		/*
+		 * Use cursor-right if it's one character only.  Avoids
+		 * removing a line of pixels from the last bold char, when
+		 * using the bold trick in the GUI.
+		 */
+		if (T_ND[0] != NUL && T_ND[1] == NUL)
+		{
+		    while (i-- > 0)
+			out_char(*T_ND);
+		}
+		else
+		{
+		    int	off;
+
+		    off = LineOffset[row] + screen_cur_col;
+		    while (i-- > 0)
+		    {
+			if (ScreenAttrs[off] != screen_attr)
+			    screen_stop_highlight();
+			out_flush_check();
+			out_char(ScreenLines[off]);
+			if (enc_dbcs == DBCS_JPNU
+				&& ScreenLines[off] == 0x8e)
+			    out_char(ScreenLines2[off]);
+			++off;
 		    }
 		}
 	    }
 	}
-	else
-	    cost = 999;
-
-	if (cost >= goto_cost)
-	{
-	    if (noinvcurs)
-		screen_stop_highlight();
-	    if (row == screen_cur_row && (col > screen_cur_col)
-							     && *T_CRI != NUL)
-		term_cursor_right(col - screen_cur_col);
-	    else
-		term_windgoto(row, col);
-	}
-	screen_cur_row = row;
-	screen_cur_col = col;
     }
+    else
+	cost = 999;
+
+    if (cost >= goto_cost)
+    {
+	if (noinvcurs)
+	    screen_stop_highlight();
+	if (row == screen_cur_row && (col > screen_cur_col)
+		&& *T_CRI != NUL)
+	    term_cursor_right(col - screen_cur_col);
+	else
+	    term_windgoto(row, col);
+    }
+    screen_cur_row = row;
+    screen_cur_col = col;
 }
 
 /*
@@ -3965,7 +3996,7 @@ screen_del_lines(
  * or inside a mapping.
  */
     int
-skip_showmode()
+skip_showmode(void)
 {
     // Call char_avail() only when we are going to show something, because it
     // takes a bit of time.  redrawing() may also call char_avail().
@@ -4222,13 +4253,13 @@ clearmode(void)
 recording_mode(int attr)
 {
     msg_puts_attr(_("recording"), attr);
-    if (!shortmess(SHM_RECORDING))
-    {
-	char s[4];
+    if (shortmess(SHM_RECORDING))
+	return;
 
-	sprintf(s, " @%c", reg_recording);
-	msg_puts_attr(s, attr);
-    }
+    char s[4];
+
+    sprintf(s, " @%c", reg_recording);
+    msg_puts_attr(s, attr);
 }
 
 /*
@@ -4460,16 +4491,7 @@ fillchar_status(int *attr, win_T *wp)
 	*attr = HL_ATTR(HLF_SNC);
 	fill = wp->w_fill_chars.stlnc;
     }
-    // Use fill when there is highlighting, and highlighting of current
-    // window differs, or the fillchars differ, or this is not the
-    // current window
-    if (*attr != 0 && ((HL_ATTR(HLF_S) != HL_ATTR(HLF_SNC)
-			|| wp != curwin || ONE_WINDOW)
-		    || (wp->w_fill_chars.stl != wp->w_fill_chars.stlnc)))
-	return fill;
-    if (wp == curwin)
-	return '^';
-    return '=';
+    return fill;
 }
 
 /*
@@ -4497,7 +4519,7 @@ redrawing(void)
 	return 0;
     else
 #endif
-	return ((!RedrawingDisabled
+	return ((RedrawingDisabled == 0
 #ifdef FEAT_EVAL
 		    || ignore_redraw_flag_for_testing
 #endif
@@ -4525,7 +4547,7 @@ messaging(void)
     void
 comp_col(void)
 {
-    int last_has_status = (p_ls == 2 || (p_ls == 1 && !ONE_WINDOW));
+    int last_has_status = last_stl_height(FALSE) > 0;
 
     sc_col = 0;
     ru_col = 0;
@@ -4540,7 +4562,7 @@ comp_col(void)
 	if (!last_has_status)
 	    sc_col = ru_col;
     }
-    if (p_sc)
+    if (p_sc && *p_sloc == 'l')
     {
 	sc_col += SHOWCMD_COLS;
 	if (!p_ru || last_has_status)	    // no need for separating space
@@ -4656,84 +4678,94 @@ get_encoded_char_adv(char_u **p)
     return mb_ptr2char_adv(p);
 }
 
+struct charstab
+{
+    int	    *cp;
+    char    *name;
+};
+static fill_chars_T fill_chars;
+static struct charstab filltab[] =
+{
+    {&fill_chars.stl,		"stl"},
+    {&fill_chars.stlnc,		"stlnc"},
+    {&fill_chars.vert,		"vert"},
+    {&fill_chars.fold,		"fold"},
+    {&fill_chars.foldopen,	"foldopen"},
+    {&fill_chars.foldclosed,	"foldclose"},
+    {&fill_chars.foldsep,	"foldsep"},
+    {&fill_chars.diff,		"diff"},
+    {&fill_chars.eob,		"eob"},
+    {&fill_chars.lastline,	"lastline"},
+};
+static lcs_chars_T lcs_chars;
+static struct charstab lcstab[] =
+{
+    {&lcs_chars.eol,		"eol"},
+    {&lcs_chars.ext,		"extends"},
+    {&lcs_chars.nbsp,		"nbsp"},
+    {&lcs_chars.prec,		"precedes"},
+    {&lcs_chars.space,		"space"},
+    {&lcs_chars.tab2,		"tab"},
+    {&lcs_chars.trail,		"trail"},
+    {&lcs_chars.lead,		"lead"},
+#ifdef FEAT_CONCEAL
+    {&lcs_chars.conceal,	"conceal"},
+#else
+    {NULL,			"conceal"},
+#endif
+    {NULL,			"multispace"},
+    {NULL,			"leadmultispace"},
+};
+
+    static char *
+field_value_err(char *errbuf, size_t errbuflen, char *fmt, char *field)
+{
+    if (errbuf == NULL)
+	return "";
+    vim_snprintf(errbuf, errbuflen, _(fmt), field);
+    return errbuf;
+}
+
 /*
  * Handle setting 'listchars' or 'fillchars'.
- * "varp" points to either the global or the window-local value.
+ * "value" points to either the global or the window-local value.
+ * "is_listchars" is TRUE for "listchars" and FALSE for "fillchars".
  * When "apply" is FALSE do not store the flags, only check for errors.
  * Assume monocell characters.
  * Returns error message, NULL if it's OK.
  */
-    char *
-set_chars_option(win_T *wp, char_u **varp, int apply)
+    static char *
+set_chars_option(win_T *wp, char_u *value, int is_listchars, int apply,
+						char *errbuf, size_t errbuflen)
 {
-    int	    round, i, len, len2, entries;
+    int	    round, i, len, entries;
     char_u  *p, *s;
     int	    c1 = 0, c2 = 0, c3 = 0;
     char_u  *last_multispace = NULL;  // Last occurrence of "multispace:"
     char_u  *last_lmultispace = NULL; // Last occurrence of "leadmultispace:"
     int	    multispace_len = 0;	      // Length of lcs-multispace string
     int	    lead_multispace_len = 0;  // Length of lcs-leadmultispace string
-    int	    is_listchars = (varp == &p_lcs || varp == &wp->w_p_lcs);
-    char_u  *value = *varp;
 
-    struct charstab
-    {
-	int	*cp;
-	char	*name;
-    };
     struct charstab *tab;
-
-    static fill_chars_T fill_chars;
-    static struct charstab filltab[] =
-    {
-	{&fill_chars.stl,	"stl"},
-	{&fill_chars.stlnc,	"stlnc"},
-	{&fill_chars.vert,	"vert"},
-	{&fill_chars.fold,	"fold"},
-	{&fill_chars.foldopen,	"foldopen"},
-	{&fill_chars.foldclosed, "foldclose"},
-	{&fill_chars.foldsep,	"foldsep"},
-	{&fill_chars.diff,	"diff"},
-	{&fill_chars.eob,	"eob"},
-	{&fill_chars.lastline,	"lastline"},
-    };
-
-    static lcs_chars_T lcs_chars;
-    struct charstab lcstab[] =
-    {
-	{&lcs_chars.eol,	"eol"},
-	{&lcs_chars.ext,	"extends"},
-	{&lcs_chars.nbsp,	"nbsp"},
-	{&lcs_chars.prec,	"precedes"},
-	{&lcs_chars.space,	"space"},
-	{&lcs_chars.tab2,	"tab"},
-	{&lcs_chars.trail,	"trail"},
-	{&lcs_chars.lead,	"lead"},
-#ifdef FEAT_CONCEAL
-	{&lcs_chars.conceal,	"conceal"},
-#else
-	{NULL,			"conceal"},
-#endif
-    };
 
     if (is_listchars)
     {
 	tab = lcstab;
 	CLEAR_FIELD(lcs_chars);
 	entries = ARRAY_LENGTH(lcstab);
-	if (varp == &wp->w_p_lcs && wp->w_p_lcs[0] == NUL)
-	    value = p_lcs;  // local value is empty, us the global value
+	if (wp->w_p_lcs[0] == NUL)
+	    value = p_lcs;  // local value is empty, use the global value
     }
     else
     {
 	tab = filltab;
 	entries = ARRAY_LENGTH(filltab);
-	if (varp == &wp->w_p_fcs && wp->w_p_fcs[0] == NUL)
+	if (wp->w_p_fcs[0] == NUL)
 	    value = p_fcs;  // local value is empty, us the global value
     }
 
     // first round: check for valid value, second round: assign values
-    for (round = 0; round <= 1; ++round)
+    for (round = 0; round <= (apply ? 1 : 0); ++round)
     {
 	if (round > 0)
 	{
@@ -4784,58 +4816,10 @@ set_chars_option(win_T *wp, char_u **varp, int apply)
 	    for (i = 0; i < entries; ++i)
 	    {
 		len = (int)STRLEN(tab[i].name);
-		if (STRNCMP(p, tab[i].name, len) == 0
-			&& p[len] == ':'
-			&& p[len + 1] != NUL)
-		{
-		    c2 = c3 = 0;
-		    s = p + len + 1;
-		    c1 = get_encoded_char_adv(&s);
-		    if (char2cells(c1) > 1)
-			return e_invalid_argument;
-		    if (tab[i].cp == &lcs_chars.tab2)
-		    {
-			if (*s == NUL)
-			    return e_invalid_argument;
-			c2 = get_encoded_char_adv(&s);
-			if (char2cells(c2) > 1)
-			    return e_invalid_argument;
-			if (!(*s == ',' || *s == NUL))
-			{
-			    c3 = get_encoded_char_adv(&s);
-			    if (char2cells(c3) > 1)
-				return e_invalid_argument;
-			}
-		    }
+		if (!(STRNCMP(p, tab[i].name, len) == 0 && p[len] == ':'))
+		    continue;
 
-		    if (*s == ',' || *s == NUL)
-		    {
-			if (round > 0)
-			{
-			    if (tab[i].cp == &lcs_chars.tab2)
-			    {
-				lcs_chars.tab1 = c1;
-				lcs_chars.tab2 = c2;
-				lcs_chars.tab3 = c3;
-			    }
-			    else if (tab[i].cp != NULL)
-				*(tab[i].cp) = c1;
-
-			}
-			p = s;
-			break;
-		    }
-		}
-	    }
-
-	    if (i == entries)
-	    {
-		len = (int)STRLEN("multispace");
-		len2 = (int)STRLEN("leadmultispace");
-		if (is_listchars
-			&& STRNCMP(p, "multispace", len) == 0
-			&& p[len] == ':'
-			&& p[len + 1] != NUL)
+		if (is_listchars && strcmp(tab[i].name, "multispace") == 0)
 		{
 		    s = p + len + 1;
 		    if (round == 0)
@@ -4847,12 +4831,16 @@ set_chars_option(win_T *wp, char_u **varp, int apply)
 			{
 			    c1 = get_encoded_char_adv(&s);
 			    if (char2cells(c1) > 1)
-				return e_invalid_argument;
+				return field_value_err(errbuf, errbuflen,
+					 e_wrong_character_width_for_field_str,
+					 tab[i].name);
 			    ++multispace_len;
 			}
 			if (multispace_len == 0)
 			    // lcs-multispace cannot be an empty string
-			    return e_invalid_argument;
+			    return field_value_err(errbuf, errbuflen,
+				    e_wrong_number_of_characters_for_field_str,
+				    tab[i].name);
 			p = s;
 		    }
 		    else
@@ -4867,14 +4855,12 @@ set_chars_option(win_T *wp, char_u **varp, int apply)
 			}
 			p = s;
 		    }
+		    break;
 		}
 
-		else if (is_listchars
-			&& STRNCMP(p, "leadmultispace", len2) == 0
-			&& p[len2] == ':'
-			&& p[len2 + 1] != NUL)
+		if (is_listchars && strcmp(tab[i].name, "leadmultispace") == 0)
 		{
-		    s = p + len2 + 1;
+		    s = p + len + 1;
 		    if (round == 0)
 		    {
 			// get length of lcs-leadmultispace string in first
@@ -4885,12 +4871,16 @@ set_chars_option(win_T *wp, char_u **varp, int apply)
 			{
 			    c1 = get_encoded_char_adv(&s);
 			    if (char2cells(c1) > 1)
-				return e_invalid_argument;
+				return field_value_err(errbuf, errbuflen,
+					 e_wrong_character_width_for_field_str,
+					 tab[i].name);
 			    ++lead_multispace_len;
 			}
 			if (lead_multispace_len == 0)
 			    // lcs-leadmultispace cannot be an empty string
-			    return e_invalid_argument;
+			    return field_value_err(errbuf, errbuflen,
+				    e_wrong_number_of_characters_for_field_str,
+				    tab[i].name);
 			p = s;
 		    }
 		    else
@@ -4905,10 +4895,66 @@ set_chars_option(win_T *wp, char_u **varp, int apply)
 			}
 			p = s;
 		    }
+		    break;
+		}
+
+		c2 = c3 = 0;
+		s = p + len + 1;
+		if (*s == NUL)
+		    return field_value_err(errbuf, errbuflen,
+				    e_wrong_number_of_characters_for_field_str,
+				    tab[i].name);
+		c1 = get_encoded_char_adv(&s);
+		if (char2cells(c1) > 1)
+		    return field_value_err(errbuf, errbuflen,
+					 e_wrong_character_width_for_field_str,
+					 tab[i].name);
+		if (tab[i].cp == &lcs_chars.tab2)
+		{
+		    if (*s == NUL)
+			return field_value_err(errbuf, errbuflen,
+				    e_wrong_number_of_characters_for_field_str,
+				    tab[i].name);
+		    c2 = get_encoded_char_adv(&s);
+		    if (char2cells(c2) > 1)
+			return field_value_err(errbuf, errbuflen,
+					 e_wrong_character_width_for_field_str,
+					 tab[i].name);
+		    if (!(*s == ',' || *s == NUL))
+		    {
+			c3 = get_encoded_char_adv(&s);
+			if (char2cells(c3) > 1)
+			    return field_value_err(errbuf, errbuflen,
+					 e_wrong_character_width_for_field_str,
+					 tab[i].name);
+		    }
+		}
+
+		if (*s == ',' || *s == NUL)
+		{
+		    if (round > 0)
+		    {
+			if (tab[i].cp == &lcs_chars.tab2)
+			{
+			    lcs_chars.tab1 = c1;
+			    lcs_chars.tab2 = c2;
+			    lcs_chars.tab3 = c3;
+			}
+			else if (tab[i].cp != NULL)
+			    *(tab[i].cp) = c1;
+
+		    }
+		    p = s;
+		    break;
 		}
 		else
-		    return e_invalid_argument;
+		    return field_value_err(errbuf, errbuflen,
+				    e_wrong_number_of_characters_for_field_str,
+				    tab[i].name);
 	    }
+
+	    if (i == entries)
+		return e_invalid_argument;
 
 	    if (*p == ',')
 		++p;
@@ -4928,13 +4974,54 @@ set_chars_option(win_T *wp, char_u **varp, int apply)
 	    wp->w_fill_chars = fill_chars;
 	}
     }
-    else if (is_listchars)
-    {
-	vim_free(lcs_chars.multispace);
-	vim_free(lcs_chars.leadmultispace);
-    }
 
     return NULL;	// no error
+}
+
+/*
+ * Handle the new value of 'fillchars'.
+ */
+    char *
+set_fillchars_option(win_T *wp, char_u *val, int apply, char *errbuf,
+							      size_t errbuflen)
+{
+    return set_chars_option(wp, val, FALSE, apply, errbuf, errbuflen);
+}
+
+/*
+ * Handle the new value of 'listchars'.
+ */
+    char *
+set_listchars_option(win_T *wp, char_u *val, int apply, char *errbuf,
+							      size_t errbuflen)
+{
+    return set_chars_option(wp, val, TRUE, apply, errbuf, errbuflen);
+}
+
+/*
+ * Function given to ExpandGeneric() to obtain possible arguments of the
+ * 'fillchars' option.
+ */
+    char_u *
+get_fillchars_name(expand_T *xp UNUSED, int idx)
+{
+    if (idx >= (int)(sizeof(filltab) / sizeof(filltab[0])))
+	return NULL;
+
+    return (char_u*)filltab[idx].name;
+}
+
+/*
+ * Function given to ExpandGeneric() to obtain possible arguments of the
+ * 'listchars' option.
+ */
+    char_u *
+get_listchars_name(expand_T *xp UNUSED, int idx)
+{
+    if (idx >= (int)(sizeof(lcstab) / sizeof(lcstab[0])))
+	return NULL;
+
+    return (char_u*)lcstab[idx].name;
 }
 
 /*
@@ -4948,15 +5035,15 @@ check_chars_options(void)
     tabpage_T   *tp;
     win_T	    *wp;
 
-    if (set_chars_option(curwin, &p_lcs, FALSE) != NULL)
+    if (set_listchars_option(curwin, p_lcs, FALSE, NULL, 0) != NULL)
 	return e_conflicts_with_value_of_listchars;
-    if (set_chars_option(curwin, &p_fcs, FALSE) != NULL)
+    if (set_fillchars_option(curwin, p_fcs, FALSE, NULL, 0) != NULL)
 	return e_conflicts_with_value_of_fillchars;
     FOR_ALL_TAB_WINDOWS(tp, wp)
     {
-	if (set_chars_option(wp, &wp->w_p_lcs, FALSE) != NULL)
+	if (set_listchars_option(wp, wp->w_p_lcs, FALSE, NULL, 0) != NULL)
 	    return e_conflicts_with_value_of_listchars;
-	if (set_chars_option(wp, &wp->w_p_fcs, FALSE) != NULL)
+	if (set_fillchars_option(wp, wp->w_p_fcs, FALSE, NULL, 0) != NULL)
 	    return e_conflicts_with_value_of_fillchars;
     }
     return NULL;

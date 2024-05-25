@@ -123,6 +123,7 @@ static void serialize_visualinfo(bufinfo_T *bi, visualinfo_T *info);
 static void unserialize_visualinfo(bufinfo_T *bi, visualinfo_T *info);
 #endif
 static void u_saveline(linenr_T lnum);
+static void u_blockfree(buf_T *buf);
 
 #define U_ALLOC_LINE(size) lalloc(size, FALSE)
 
@@ -1164,21 +1165,21 @@ read_string_decrypt(bufinfo_T *bi, int len)
 {
     char_u  *ptr = alloc(len + 1);
 
-    if (ptr != NULL)
+    if (ptr == NULL)
+	return NULL;
+
+    if (len > 0 && undo_read(bi, ptr, len) == FAIL)
     {
-	if (len > 0 && undo_read(bi, ptr, len) == FAIL)
-	{
-	    vim_free(ptr);
-	    return NULL;
-	}
-	// In case there are text properties there already is a NUL, but
-	// checking for that is more expensive than just adding a dummy byte.
-	ptr[len] = NUL;
-#ifdef FEAT_CRYPT
-	if (bi->bi_state != NULL && bi->bi_buffer == NULL)
-	    crypt_decode_inplace(bi->bi_state, ptr, len, FALSE);
-#endif
+	vim_free(ptr);
+	return NULL;
     }
+    // In case there are text properties there already is a NUL, but
+    // checking for that is more expensive than just adding a dummy byte.
+    ptr[len] = NUL;
+#ifdef FEAT_CRYPT
+    if (bi->bi_state != NULL && bi->bi_buffer == NULL)
+	crypt_decode_inplace(bi->bi_state, ptr, len, FALSE);
+#endif
     return ptr;
 }
 
@@ -2717,7 +2718,7 @@ u_undoredo(int undo)
 				      || bot > curbuf->b_ml.ml_line_count + 1)
 	{
 	    unblock_autocmds();
-	    iemsg(_(e_u_undo_line_numbers_wrong));
+	    iemsg(e_u_undo_line_numbers_wrong);
 	    changed();		// don't want UNCHANGED now
 	    return;
 	}
@@ -3307,7 +3308,7 @@ u_get_headentry(void)
 {
     if (curbuf->b_u_newhead == NULL || curbuf->b_u_newhead->uh_entry == NULL)
     {
-	iemsg(_(e_undo_list_corrupt));
+	iemsg(e_undo_list_corrupt);
 	return NULL;
     }
     return curbuf->b_u_newhead->uh_entry;
@@ -3339,7 +3340,7 @@ u_getbot(void)
 	uep->ue_bot = uep->ue_top + uep->ue_size + 1 + extra;
 	if (uep->ue_bot < 1 || uep->ue_bot > curbuf->b_ml.ml_line_count)
 	{
-	    iemsg(_(e_undo_line_missing));
+	    iemsg(e_undo_line_missing);
 	    uep->ue_bot = uep->ue_top + 1;  // assume all lines deleted, will
 					    // get all the old lines back
 					    // without deleting the current
@@ -3472,7 +3473,7 @@ u_freeentry(u_entry_T *uep, long n)
 /*
  * invalidate the undo buffer; called when storage has already been released
  */
-    void
+    static void
 u_clearall(buf_T *buf)
 {
     buf->b_u_newhead = buf->b_u_oldhead = buf->b_u_curhead = NULL;
@@ -3482,6 +3483,30 @@ u_clearall(buf_T *buf)
     buf->b_u_line_ptr.ul_len = 0;
     buf->b_u_line_lnum = 0;
 }
+
+/*
+ * Free all allocated memory blocks for the buffer 'buf'.
+ */
+    static void
+u_blockfree(buf_T *buf)
+{
+    while (buf->b_u_oldhead != NULL)
+	u_freeheader(buf, buf->b_u_oldhead, NULL);
+    vim_free(buf->b_u_line_ptr.ul_line);
+}
+
+/*
+ * Free all allocated memory blocks for the buffer 'buf'.
+ * and invalidate the undo buffer
+ */
+    void
+u_clearallandblockfree(buf_T *buf)
+{
+    u_blockfree(buf);
+    u_clearall(buf);
+}
+
+
 
 /*
  * Save the line "lnum" for the "U" command.
@@ -3510,12 +3535,12 @@ u_saveline(linenr_T lnum)
     void
 u_clearline(void)
 {
-    if (curbuf->b_u_line_ptr.ul_line != NULL)
-    {
-	VIM_CLEAR(curbuf->b_u_line_ptr.ul_line);
-	curbuf->b_u_line_ptr.ul_len = 0;
-	curbuf->b_u_line_lnum = 0;
-    }
+    if (curbuf->b_u_line_ptr.ul_line == NULL)
+	return;
+
+    VIM_CLEAR(curbuf->b_u_line_ptr.ul_line);
+    curbuf->b_u_line_ptr.ul_len = 0;
+    curbuf->b_u_line_lnum = 0;
 }
 
 /*
@@ -3560,17 +3585,6 @@ u_undoline(void)
     curwin->w_cursor.col = t;
     curwin->w_cursor.lnum = curbuf->b_u_line_lnum;
     check_cursor_col();
-}
-
-/*
- * Free all allocated memory blocks for the buffer 'buf'.
- */
-    void
-u_blockfree(buf_T *buf)
-{
-    while (buf->b_u_oldhead != NULL)
-	u_freeheader(buf, buf->b_u_oldhead, NULL);
-    vim_free(buf->b_u_line_ptr.ul_line);
 }
 
 /*
@@ -3629,7 +3643,7 @@ curbufIsChanged(void)
  * Recursive.
  */
     static void
-u_eval_tree(u_header_T *first_uhp, list_T *list)
+u_eval_tree(buf_T *buf, u_header_T *first_uhp, list_T *list)
 {
     u_header_T  *uhp = first_uhp;
     dict_T	*dict;
@@ -3641,9 +3655,9 @@ u_eval_tree(u_header_T *first_uhp, list_T *list)
 	    return;
 	dict_add_number(dict, "seq", uhp->uh_seq);
 	dict_add_number(dict, "time", (long)uhp->uh_time);
-	if (uhp == curbuf->b_u_newhead)
+	if (uhp == buf->b_u_newhead)
 	    dict_add_number(dict, "newhead", 1);
-	if (uhp == curbuf->b_u_curhead)
+	if (uhp == buf->b_u_curhead)
 	    dict_add_number(dict, "curhead", 1);
 	if (uhp->uh_save_nr > 0)
 	    dict_add_number(dict, "save", uhp->uh_save_nr);
@@ -3655,7 +3669,7 @@ u_eval_tree(u_header_T *first_uhp, list_T *list)
 	    if (alt_list != NULL)
 	    {
 		// Recursive call to add alternate undo tree.
-		u_eval_tree(uhp->uh_alt_next.ptr, alt_list);
+		u_eval_tree(buf, uhp->uh_alt_next.ptr, alt_list);
 		dict_add_list(dict, "alt", alt_list);
 	    }
 	}
@@ -3721,29 +3735,36 @@ u_undofile_reset_and_delete(buf_T *buf)
  #endif
 
 /*
- * "undotree()" function
+ * "undotree(expr)" function
  */
     void
 f_undotree(typval_T *argvars UNUSED, typval_T *rettv)
 {
-    if (rettv_dict_alloc(rettv) == OK)
+    if (in_vim9script() && check_for_opt_buffer_arg(argvars, 0) == FAIL)
+	return;
+
+    if (rettv_dict_alloc(rettv) == FAIL)
+	return;
+
+    typval_T	*tv = &argvars[0];
+    buf_T	*buf = tv->v_type == VAR_UNKNOWN ? curbuf : get_buf_arg(tv);
+    if (buf == NULL)
+	return;
+
+    dict_T *dict = rettv->vval.v_dict;
+
+    dict_add_number(dict, "synced", (long)buf->b_u_synced);
+    dict_add_number(dict, "seq_last", buf->b_u_seq_last);
+    dict_add_number(dict, "save_last", buf->b_u_save_nr_last);
+    dict_add_number(dict, "seq_cur", buf->b_u_seq_cur);
+    dict_add_number(dict, "time_cur", (long)buf->b_u_time_cur);
+    dict_add_number(dict, "save_cur", buf->b_u_save_nr_cur);
+
+    list_T *list = list_alloc();
+    if (list != NULL)
     {
-	dict_T *dict = rettv->vval.v_dict;
-	list_T *list;
-
-	dict_add_number(dict, "synced", (long)curbuf->b_u_synced);
-	dict_add_number(dict, "seq_last", curbuf->b_u_seq_last);
-	dict_add_number(dict, "save_last", curbuf->b_u_save_nr_last);
-	dict_add_number(dict, "seq_cur", curbuf->b_u_seq_cur);
-	dict_add_number(dict, "time_cur", (long)curbuf->b_u_time_cur);
-	dict_add_number(dict, "save_cur", curbuf->b_u_save_nr_cur);
-
-	list = list_alloc();
-	if (list != NULL)
-	{
-	    u_eval_tree(curbuf->b_u_oldhead, list);
-	    dict_add_list(dict, "entries", list);
-	}
+	u_eval_tree(buf, buf->b_u_oldhead, list);
+	dict_add_list(dict, "entries", list);
     }
 }
 

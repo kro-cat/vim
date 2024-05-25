@@ -1401,7 +1401,7 @@ nfa_regatom(void)
 		    rc_did_emsg = TRUE;
 		    return FAIL;
 		}
-		siemsg("INTERNAL: Unknown character class char: %d", c);
+		siemsg("Unknown character class char: %d", c);
 		return FAIL;
 	    }
 
@@ -1733,7 +1733,7 @@ nfa_regatom(void)
 			    EMIT((int)n);
 			    break;
 			}
-			else if (c == '\'' && n == 0)
+			else if (no_Magic(c) == '\'' && n == 0)
 			{
 			    // \%'m  \%<'m  \%>'m
 			    EMIT(cmp == '<' ? NFA_MARK_LT :
@@ -1764,6 +1764,7 @@ collection:
 	    endp = skip_anyof(p);
 	    if (*endp == ']')
 	    {
+		int plen;
 		/*
 		 * Try to reverse engineer character classes. For example,
 		 * recognize that [0-9] stands for \d and [A-Za-z_] for \h,
@@ -2033,13 +2034,43 @@ collection:
 			else
 			{
 			    if (got_coll_char == TRUE && startc == 0)
+			    {
 				EMIT(0x0a);
+				EMIT(NFA_CONCAT);
+			    }
 			    else
+			    {
 				EMIT(startc);
-			    EMIT(NFA_CONCAT);
+				if (!(enc_utf8 && (utf_ptr2len(regparse) != (plen = utfc_ptr2len(regparse)))))
+				{
+				    EMIT(NFA_CONCAT);
+				}
+			    }
 			}
 		    }
 
+		    if (enc_utf8 && (utf_ptr2len(regparse) != (plen = utfc_ptr2len(regparse))))
+		    {
+			int i = utf_ptr2len(regparse);
+
+			c = utf_ptr2char(regparse + i);
+
+			// Add composing characters
+			for (;;)
+			{
+			    if (c == 0)
+				// \x00 is translated to \x0a, start at \x01.
+				EMIT(1);
+			    else
+				EMIT(c);
+			    EMIT(NFA_CONCAT);
+			    if ((i += utf_char2len(c)) >= plen)
+				break;
+			    c = utf_ptr2char(regparse + i);
+			}
+			EMIT(NFA_COMPOSING);
+			EMIT(NFA_CONCAT);
+		    }
 		    MB_PTR_ADV(regparse);
 		} // while (p < endp)
 
@@ -3822,7 +3853,7 @@ post2nfa(int *postfix, int *end, int nfa_calc_size)
 
 	} // switch(*p)
 
-    } // for(p = postfix; *p; ++p)
+    } // for (p = postfix; *p; ++p)
 
     if (nfa_calc_size == TRUE)
     {
@@ -5356,7 +5387,7 @@ recursive_regmatch(
 		    rex.input = rex.line;
 		}
 		else
-		    rex.input = rex.line + STRLEN(rex.line);
+		    rex.input = rex.line + reg_getline_len(rex.lnum);
 	    }
 	    if ((int)(rex.input - rex.line) >= state->val)
 	    {
@@ -5799,10 +5830,11 @@ nfa_regmatch(
 	goto theend;
     }
 
-#define	ADD_STATE_IF_MATCH(state)			\
-    if (result) {					\
-	add_state = state->out;				\
-	add_off = clen;					\
+#define	ADD_STATE_IF_MATCH(state)	\
+    if (result)				\
+    {					\
+	add_state = state->out;		\
+	add_off = clen;			\
     }
 
     /*
@@ -6417,6 +6449,84 @@ nfa_regmatch(
 		result_if_matched = (t->state->c == NFA_START_COLL);
 		for (;;)
 		{
+		    if (state->c == NFA_COMPOSING)
+		    {
+			int	    mc = curc;
+			int	    len = 0;
+			nfa_state_T *end;
+			nfa_state_T *sta;
+			int	    cchars[MAX_MCO];
+			int	    ccount = 0;
+			int	    j;
+
+			sta = t->state->out->out;
+			len = 0;
+			if (utf_iscomposing(sta->c))
+			{
+			    // Only match composing character(s), ignore base
+			    // character.  Used for ".{composing}" and "{composing}"
+			    // (no preceding character).
+			    len += mb_char2len(mc);
+			}
+			if (rex.reg_icombine && len == 0)
+			{
+			    // If \Z was present, then ignore composing characters.
+			    // When ignoring the base character this always matches.
+			    if (sta->c != curc)
+				result = FAIL;
+			    else
+				result = OK;
+			    while (sta->c != NFA_END_COMPOSING)
+				sta = sta->out;
+			}
+			// Check base character matches first, unless ignored.
+			else if (len > 0 || mc == sta->c)
+//			if (len > 0 || mc == sta->c)
+			{
+			    if (len == 0)
+			    {
+				len += mb_char2len(mc);
+				sta = sta->out;
+			    }
+
+			    // We don't care about the order of composing characters.
+			    // Get them into cchars[] first.
+			    while (len < clen)
+			    {
+				mc = mb_ptr2char(rex.input + len);
+				cchars[ccount++] = mc;
+				len += mb_char2len(mc);
+				if (ccount == MAX_MCO)
+				    break;
+			    }
+
+			    // Check that each composing char in the pattern matches a
+			    // composing char in the text.  We do not check if all
+			    // composing chars are matched.
+			    result = OK;
+			    while (sta->c != NFA_END_COMPOSING)
+			    {
+				for (j = 0; j < ccount; ++j)
+				    if (cchars[j] == sta->c)
+					break;
+				if (j == ccount)
+				{
+				    result = FAIL;
+				    break;
+				}
+				sta = sta->out;
+			    }
+			}
+			else
+			    result = FAIL;
+
+			if (t->state->out->out1->c == NFA_END_COMPOSING)
+			{
+			    end = t->state->out->out1;
+			    ADD_STATE_IF_MATCH(end);
+			}
+			break;
+		    }
 		    if (state->c == NFA_END_COLL)
 		    {
 			result = !result_if_matched;
@@ -6677,7 +6787,9 @@ nfa_regmatch(
 		int subidx;
 		int bytelen;
 
-		if (t->state->c <= NFA_BACKREF9)
+#ifdef FEAT_SYN_HL
+		if (t->state->c >= NFA_BACKREF1 && t->state->c <= NFA_BACKREF9)
+#endif
 		{
 		    subidx = t->state->c - NFA_BACKREF1 + 1;
 		    result = match_backref(&t->subs.norm, subidx, &bytelen);
@@ -6825,8 +6937,7 @@ nfa_regmatch(
 		{
 		    colnr_T pos_col = pos->lnum == rex.lnum + rex.reg_firstlnum
 							  && pos->col == MAXCOL
-				      ? (colnr_T)STRLEN(reg_getline(
-						pos->lnum - rex.reg_firstlnum))
+				      ? reg_getline_len(pos->lnum - rex.reg_firstlnum)
 				      : pos->col;
 
 		    result = (pos->lnum == rex.lnum + rex.reg_firstlnum
@@ -6902,7 +7013,7 @@ nfa_regmatch(
 
 #ifdef DEBUG
 		if (c < 0)
-		    siemsg("INTERNAL: Negative state char: %ld", (long)c);
+		    siemsg("Negative state char: %ld", (long)c);
 #endif
 		result = (c == curc);
 
@@ -7193,9 +7304,9 @@ nfa_regtry(
     if (f != NULL)
     {
 	fprintf(f, "\n\n\t=======================================================\n");
-#ifdef DEBUG
+# ifdef DEBUG
 	fprintf(f, "\tRegexp is \"%s\"\n", nfa_regengine.expr);
-#endif
+# endif
 	fprintf(f, "\tInput text is \"%s\" \n", rex.input);
 	fprintf(f, "\t=======================================================\n\n");
 	nfa_print_state(f, start);
@@ -7338,7 +7449,7 @@ nfa_regexec_both(
     // Be paranoid...
     if (prog == NULL || line == NULL)
     {
-	iemsg(_(e_null_argument));
+	iemsg(e_null_argument);
 	goto theend;
     }
 
@@ -7504,7 +7615,7 @@ nfa_regcomp(char_u *expr, int re_flags)
     post2nfa(postfix, post_ptr, TRUE);
 
     // allocate the regprog with space for the compiled regexp
-    prog_size = sizeof(nfa_regprog_T) + sizeof(nfa_state_T) * (nstate - 1);
+    prog_size = offsetof(nfa_regprog_T, state) + sizeof(nfa_state_T) * nstate;
     prog = alloc(prog_size);
     if (prog == NULL)
 	goto fail;

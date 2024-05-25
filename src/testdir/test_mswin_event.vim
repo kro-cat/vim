@@ -6,7 +6,7 @@ CheckMSWindows
 source mouse.vim
 
 " Helper function for sending a grouped sequence of low level key presses
-" The modifer key(s) can be included as VK Key Codes in the sequence
+" The modifier key(s) can be included as VK Key Codes in the sequence
 " Keydown events will be sent, to to the end of the group, then keyup events
 " will be sent in reverse order to release the keys.
 func SendKeyGroup(keygroup)
@@ -19,7 +19,7 @@ func SendKeyGroup(keygroup)
 endfunc
 
 " Send individual key press and release events.
-" the modifers for the key press can be specified in the modifiers arg.
+" the modifiers for the key press can be specified in the modifiers arg.
 func SendKeyWithModifiers(key, modifiers)
   let args = { }
   let args.keycode = a:key
@@ -36,6 +36,17 @@ func SendKey(key)
   call SendKeyWithModifiers(a:key, 0)
 endfunc
 
+" getcharstr(0) but catch Vim:Interrupt
+func Getcharstr()
+  try
+    let ch = getcharstr(0)
+  catch /^Vim:Interrupt$/
+    let ch = "\<c-c>"
+  endtry
+  return ch
+endfunc
+
+
 " Send a string of individual key-press events, without modifiers.
 func SendKeyStr(keystring)
   for k in a:keystring
@@ -43,7 +54,7 @@ func SendKeyStr(keystring)
   endfor
 endfunc
 
-" This tells Vim to execute the buffered keys as user commands, 
+" This tells Vim to execute the buffered keys as user commands,
 " ie. same as feekdeys with mode X would do.
 func ExecuteBufferedKeys()
   if has('gui_running')
@@ -158,7 +169,7 @@ let s:VK = {
   let s:MOD_MASK_SHIFT = 0x02
   let s:MOD_MASK_CTRL  = 0x04
   let s:MOD_MASK_ALT   = 0x08
-  
+
   let s:vim_key_modifiers = [
     \ ["",       0,   []],
     \ ["S-",     2,   [s:VK.LSHIFT]],
@@ -347,7 +358,7 @@ func s:LoopTestKeyArray(arr)
   for [kcodes, kstr] in a:arr
     " Send as a sequence of key presses.
     call SendKeyGroup(kcodes)
-    let ch = getcharstr(0)
+    let ch = Getcharstr()
     " need to deal a bit differently with the non-printable ascii chars < 0x20
     if kstr < 0x20 && index([s:VK.CONTROL, s:VK.LCONTROL, s:VK.RCONTROL], kcodes[0]) >= 0
       call assert_equal(nr2char(kstr), $"{ch}")
@@ -359,7 +370,7 @@ func s:LoopTestKeyArray(arr)
     " and when the virtual termcap maps the character
     call assert_equal(0, mod_mask, $"key = {kstr}")
 
-    " Send as a single key press with a modifers mask.
+    " Send as a single key press with a modifiers mask.
     let modifiers = 0
     let key = kcodes[0]
     for key in kcodes
@@ -374,7 +385,7 @@ func s:LoopTestKeyArray(arr)
       endif
     endfor
     call SendKeyWithModifiers(key, modifiers)
-    let ch = getcharstr(0)
+    let ch = Getcharstr()
     " need to deal a bit differently with the non-printable ascii chars < 0x20
     if kstr < 0x20 && index([s:VK.CONTROL, s:VK.LCONTROL, s:VK.RCONTROL],  kcodes[0]) >= 0
       call assert_equal(nr2char(kstr), $"{ch}")
@@ -408,10 +419,10 @@ func Test_mswin_event_character_keys()
 " (0x30 - 0x39) : VK_0 - VK_9 are the same as ASCII '0' - '9'
   for kc in range(48, 57)
     call SendKey(kc)
-    let ch = getcharstr(0)
+    let ch = Getcharstr()
     call assert_equal(nr2char(kc), ch)
     call SendKeyWithModifiers(kc, 0)
-    let ch = getcharstr(0)
+    let ch = Getcharstr()
     call assert_equal(nr2char(kc), ch)
   endfor
 
@@ -431,16 +442,16 @@ func Test_mswin_event_character_keys()
 " Test for lowercase 'a' to 'z', VK codes 65(0x41) - 90(0x5A)
 " Note: VK_A-VK_Z virtual key codes coincide with uppercase ASCII codes A-Z.
 " eg VK_A is 65, and the ASCII character code for uppercase 'A' is also 65.
-" Caution: these are interpreted as lowercase when Shift is NOT pressed. 
+" Caution: these are interpreted as lowercase when Shift is NOT pressed.
 " eg, sending VK_A (65) 'A' Key code without shift modifier, will produce ASCII
 " char 'a' (91) as the output.  The ASCII codes for the lowercase letters are
 " numbered 32 higher than their uppercase versions.
   for kc in range(65, 90)
     call SendKey(kc)
-    let ch = getcharstr(0)
+    let ch = Getcharstr()
     call assert_equal(nr2char(kc + 32), ch)
     call SendKeyWithModifiers(kc, 0)
-    let ch = getcharstr(0)
+    let ch = Getcharstr()
     call assert_equal(nr2char(kc + 32), ch)
   endfor
 
@@ -449,23 +460,28 @@ func Test_mswin_event_character_keys()
   for modkey in [s:VK.SHIFT, s:VK.LSHIFT, s:VK.RSHIFT]
     for kc in range(65, 90)
       call SendKeyGroup([modkey, kc])
-      let ch = getcharstr(0)
+      let ch = Getcharstr()
       call assert_equal(nr2char(kc), ch)
       call SendKeyWithModifiers(kc, s:MOD_MASK_SHIFT)
-      let ch = getcharstr(0)
+      let ch = Getcharstr()
       call assert_equal(nr2char(kc), ch)
     endfor
   endfor
 
-  " Test for <Ctrl-A> to <Ctrl-Z> keys
- "  Expect the unicode characters 0x01 to 0x1A
+" Test for <Ctrl-A> to <Ctrl-Z> keys
+" Expect the unicode characters 0x01 to 0x1A
+" Note: Skip C because it triggers an Interrupt (CTRL-C)
+"       which causes a test failure
    for modkey in [s:VK.CONTROL, s:VK.LCONTROL, s:VK.RCONTROL]
     for kc in range(65, 90)
+      if kc == 67
+        continue
+      endif
       call SendKeyGroup([modkey, kc])
-      let ch = getcharstr(0)
+      let ch = Getcharstr()
       call assert_equal(nr2char(kc - 64), ch)
       call SendKeyWithModifiers(kc, s:MOD_MASK_CTRL)
-      let ch = getcharstr(0)
+      let ch = Getcharstr()
       call assert_equal(nr2char(kc - 64), ch)
     endfor
   endfor
@@ -518,7 +534,7 @@ func Test_mswin_event_function_keys()
         while getchar(0)
         endwhile
         call SendKeyWithModifiers(111+n, vim_mod_mask)
-        let ch = getcharstr(0)
+        let ch = Getcharstr()
         let mod_mask = getcharmod()
         call assert_equal(keycode, $"{ch}", $"key = {kstr}")
         " workaround for the virtual termcap maps changing the character
@@ -590,21 +606,21 @@ func Test_mswin_event_movement_keys()
       while getchar(0)
       endwhile
       execute 'call feedkeys("\<' .. kstr .. '>")'
-      let chstr_fk = getcharstr(0)
+      let chstr_fk = Getcharstr()
       call assert_equal(chstr_eval, chstr_fk, $"feedkeys = <{kstr}>")
 
       " flush out the typeahead buffer
       while getchar(0)
       endwhile
       call SendKey(kcode)
-      let chstr_alone = getcharstr(0)
+      let chstr_alone = Getcharstr()
       let chstr_alone_end = chstr_alone[len(chstr_alone)-2:len(chstr_alone)-1]
 
       " flush out the typeahead buffer
       while getchar(0)
       endwhile
       call SendKeyGroup(mod_keycodes + [kcode])
-      let chstr_mswin = getcharstr(0)
+      let chstr_mswin = Getcharstr()
       let chstr_mswin_end = chstr_mswin[len(chstr_mswin)-2:len(chstr_mswin)-1]
       let mod_mask = getcharmod()
 
@@ -653,7 +669,7 @@ func Test_QWERTY_Ctrl_minus()
   new
 
   call SendKeyGroup([s:VK.CONTROL, s:VK.OEM_MINUS])
-  let ch = getcharstr(0)
+  let ch = Getcharstr()
   call assert_equal(nr2char(0x1f),ch)
 
   call SendKey(s:VK.KEY_I)
@@ -727,14 +743,14 @@ func Test_mswin_event_mouse()
   if has('gui_running')
     let args = { }
     let args.row = 9
-    let args.col = 7
+    let args.col = 5
     let args.move = 1
     let args.cell = 1
     call test_mswin_event("mouse", args)
     call feedkeys("\<Esc>", 'Lx!')
     let pos = getmousepos()
     call assert_equal(9, pos.screenrow)
-    call assert_equal(7, pos.screencol)
+    call assert_equal(5, pos.screencol)
 
     let args.cell = 0
     call test_mswin_event("mouse", args)
@@ -808,7 +824,7 @@ func Test_mswin_event_mouse()
   call MouseShiftWheelDown(2, 1)
   call feedkeys("H", 'Lx!')
   " should scroll from where it is (4) + visible buffer height - cmdheight
-  let shift_scroll_height = line('w$') - line('w0') - &cmdheight 
+  let shift_scroll_height = line('w$') - line('w0') - &cmdheight
   call assert_equal(4 + shift_scroll_height, line('.'))
 
   " Shift Scroll Up
@@ -821,7 +837,7 @@ func Test_mswin_event_mouse()
     call MSWinMouseEvent(0x100, 2, 1, 0, 0, 0x04)
     call feedkeys("H", 'Lx!')
     " should scroll from where it is (4) + visible buffer height - cmdheight
-    let shift_scroll_height = line('w$') - line('w0') - &cmdheight 
+    let shift_scroll_height = line('w$') - line('w0') - &cmdheight
     call assert_equal(4 + shift_scroll_height, line('.'))
 
     " Shift Scroll Up (using MOD)
@@ -854,7 +870,7 @@ func Test_mswin_event_mouse()
   call feedkeys('g0', 'Lx!')
   " should scroll from where it is (7) + window width
   call assert_equal(7 + winwidth(0), col('.'))
- 
+
   " Shift Scroll Left
   call MouseShiftWheelLeft(1, 50)
   call feedkeys('g0', 'Lx!')
@@ -880,8 +896,8 @@ func Test_mswin_event_mouse()
           \ substitute(e, '[<>]', '', 'g') .. '")<CR>'
   endfor
 
-  " Test various mouse buttons 
-  "(0 - Left, 1 - Middle, 2 - Right, 
+  " Test various mouse buttons
+  "(0 - Left, 1 - Middle, 2 - Right,
   " 0x300 - MOUSE_X1/FROM_LEFT_3RD_BUTTON,
   " 0x400 - MOUSE_X2/FROM_LEFT_4TH_BUTTON)
   for button in [0, 1, 2, 0x300, 0x400]
@@ -971,10 +987,10 @@ func Test_mswin_event_error_handling()
   let args = #{button: 0, row: 2, col: 4, move: 0, multiclick: 0, modifiers: 0}
   call assert_fails("call test_mswin_event('a1b2c3', args)", 'E475:')
   call assert_fails("call test_mswin_event(test_null_string(), {})", 'E475:')
-  
+
   call assert_fails("call test_mswin_event([], args)", 'E1174:')
   call assert_fails("call test_mswin_event('abc', [])", 'E1206:')
-  
+
   call assert_false(test_mswin_event('mouse', test_null_dict()))
   let args = #{row: 2, col: 4, multiclick: 0, modifiers: 0}
   call assert_false(test_mswin_event('mouse', args))

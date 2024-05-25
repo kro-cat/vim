@@ -266,7 +266,7 @@ func Test_term_mouse_middle_click()
   let &ttymouse = save_ttymouse
   call test_override('no_query_mouse', 0)
   let @* = save_quotestar
-  let @+ = save_quotestar
+  let @+ = save_quoteplus
   bwipe!
 endfunc
 
@@ -894,7 +894,7 @@ func Test_term_mouse_multiple_clicks_to_visually_select()
   let save_term = &term
   let save_ttymouse = &ttymouse
   call test_override('no_query_mouse', 1)
-  
+
   " 'mousetime' must be sufficiently large, or else the test is flaky when
   " using a ssh connection with X forwarding; i.e. ssh -X (issue #7563).
   set mouse=a term=xterm mousetime=600

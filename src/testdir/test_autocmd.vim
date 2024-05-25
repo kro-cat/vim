@@ -54,6 +54,9 @@ if has('timers')
   endfunc
 
   func Test_cursorhold_insert()
+    " depends on timing
+    let g:test_is_flaky = 1
+
     " Need to move the cursor.
     call feedkeys("ggG", "xt")
 
@@ -267,10 +270,11 @@ func Test_win_tab_autocmd()
   let g:record = []
 
   augroup testing
+    au WinNewPre * call add(g:record, 'WinNewPre')
     au WinNew * call add(g:record, 'WinNew')
     au WinClosed * call add(g:record, 'WinClosed')
-    au WinEnter * call add(g:record, 'WinEnter') 
-    au WinLeave * call add(g:record, 'WinLeave') 
+    au WinEnter * call add(g:record, 'WinEnter')
+    au WinLeave * call add(g:record, 'WinLeave')
     au TabNew * call add(g:record, 'TabNew')
     au TabClosed * call add(g:record, 'TabClosed')
     au TabEnter * call add(g:record, 'TabEnter')
@@ -283,8 +287,8 @@ func Test_win_tab_autocmd()
   close
 
   call assert_equal([
-	\ 'WinLeave', 'WinNew', 'WinEnter',
-	\ 'WinLeave', 'TabLeave', 'WinNew', 'WinEnter', 'TabNew', 'TabEnter',
+	\ 'WinNewPre', 'WinLeave', 'WinNew', 'WinEnter',
+	\ 'WinLeave', 'TabLeave', 'WinNewPre', 'WinNew', 'WinEnter', 'TabNew', 'TabEnter',
 	\ 'WinLeave', 'TabLeave', 'WinClosed', 'TabClosed', 'WinEnter', 'TabEnter',
 	\ 'WinLeave', 'WinClosed', 'WinEnter'
 	\ ], g:record)
@@ -295,15 +299,94 @@ func Test_win_tab_autocmd()
   bwipe somefile
 
   call assert_equal([
-	\ 'WinLeave', 'TabLeave', 'WinNew', 'WinEnter', 'TabNew', 'TabEnter',
+	\ 'WinLeave', 'TabLeave', 'WinNewPre', 'WinNew', 'WinEnter', 'TabNew', 'TabEnter',
 	\ 'WinLeave', 'TabLeave', 'WinEnter', 'TabEnter',
 	\ 'WinClosed', 'TabClosed'
+	\ ], g:record)
+
+  let g:record = []
+  copen
+  help
+  tabnext
+  vnew
+
+  call assert_equal([
+	\ 'WinNewPre', 'WinLeave', 'WinNew', 'WinEnter',
+	\ 'WinNewPre', 'WinLeave', 'WinNew', 'WinEnter',
+	\ 'WinNewPre', 'WinLeave', 'WinNew', 'WinEnter'
 	\ ], g:record)
 
   augroup testing
     au!
   augroup END
   unlet g:record
+endfunc
+
+func Test_WinNewPre()
+  " Test that the old window layout can be accessed before a new window is created.
+  let g:layouts_pre = []
+  let g:layouts_post = []
+  augroup testing
+    au WinNewPre * call add(g:layouts_pre, winlayout())
+    au WinNew * call add(g:layouts_post, winlayout())
+  augroup END
+  split
+  call assert_notequal(g:layouts_pre[0], g:layouts_post[0])
+  split
+  call assert_equal(g:layouts_pre[1], g:layouts_post[0])
+  call assert_notequal(g:layouts_pre[1], g:layouts_post[1])
+  tabnew
+  call assert_notequal(g:layouts_pre[2], g:layouts_post[1])
+  call assert_notequal(g:layouts_pre[2], g:layouts_post[2])
+  augroup testing
+    au!
+  augroup END
+  unlet g:layouts_pre
+  unlet g:layouts_post
+
+  " Test modifying window layout during WinNewPre throws.
+  let g:caught = 0
+  augroup testing
+    au!
+    au WinNewPre * split
+  augroup END
+  try
+    vnew
+  catch
+    let g:caught += 1
+  endtry
+  augroup testing
+    au!
+    au WinNewPre * tabnew
+  augroup END
+  try
+    vnew
+  catch
+    let g:caught += 1
+  endtry
+  augroup testing
+    au!
+    au WinNewPre * close
+  augroup END
+  try
+    vnew
+  catch
+    let g:caught += 1
+  endtry
+  augroup testing
+    au!
+    au WinNewPre * tabclose
+  augroup END
+  try
+    vnew
+  catch
+    let g:caught += 1
+  endtry
+  call assert_equal(4, g:caught)
+  augroup testing
+    au!
+  augroup END
+  unlet g:caught
 endfunc
 
 func Test_WinResized()
@@ -731,6 +814,27 @@ func Test_WinClosed_switch_tab()
   " Check that the tabline has been fully removed
   call assert_equal([1, 1], win_screenpos(0))
 
+  autocmd! test-WinClosed
+  augroup! test-WinClosed
+  %bwipe!
+endfunc
+
+" This used to trigger WinClosed twice for the same window, and the window's
+" buffer was NULL in the second autocommand.
+func Test_WinClosed_BufUnload_close_other()
+  tabnew
+  let g:tab = tabpagenr()
+  let g:buf = bufnr()
+  new
+  setlocal bufhidden=wipe
+  augroup test-WinClosed
+    autocmd BufUnload * ++once exe g:buf .. 'bwipe!'
+    autocmd WinClosed * call tabpagebuflist(g:tab)
+  augroup END
+  close
+
+  unlet g:tab
+  unlet g:buf
   autocmd! test-WinClosed
   augroup! test-WinClosed
   %bwipe!
@@ -1909,14 +2013,63 @@ func Test_Cmdline()
   call assert_equal(':', g:entered)
   au! CmdlineChanged
 
+  autocmd CmdlineChanged : let g:log += [getcmdline()]
+
   let g:log = []
   cnoremap <F1> <Cmd>call setcmdline('ls')<CR>
-  autocmd CmdlineChanged : let g:log += [getcmdline()]
   call feedkeys(":\<F1>", 'xt')
   call assert_equal(['ls'], g:log)
+  cunmap <F1>
+
+  let g:log = []
+  call feedkeys(":sign \<Tab>\<Tab>\<C-N>\<C-P>\<S-Tab>\<S-Tab>\<Esc>", 'xt')
+  call assert_equal([
+        \ 's',
+        \ 'si',
+        \ 'sig',
+        \ 'sign',
+        \ 'sign ',
+        \ 'sign define',
+        \ 'sign jump',
+        \ 'sign list',
+        \ 'sign jump',
+        \ 'sign define',
+        \ 'sign ',
+        \ ], g:log)
+  let g:log = []
+  set wildmenu wildoptions+=pum
+  call feedkeys(":sign \<S-Tab>\<PageUp>\<kPageUp>\<kPageDown>\<PageDown>\<Esc>", 'xt')
+  call assert_equal([
+        \ 's',
+        \ 'si',
+        \ 'sig',
+        \ 'sign',
+        \ 'sign ',
+        \ 'sign unplace',
+        \ 'sign jump',
+        \ 'sign define',
+        \ 'sign undefine',
+        \ 'sign unplace',
+        \ ], g:log)
+  set wildmenu& wildoptions&
+
+  let g:log = []
+  let @r = 'abc'
+  call feedkeys(":0\<C-R>r1\<C-R>\<C-O>r2\<C-R>\<C-R>r3\<Esc>", 'xt')
+  call assert_equal([
+        \ '0',
+        \ '0a',
+        \ '0ab',
+        \ '0abc',
+        \ '0abc1',
+        \ '0abc1abc',
+        \ '0abc1abc2',
+        \ '0abc1abc2abc',
+        \ '0abc1abc2abc3',
+        \ ], g:log)
+
   unlet g:log
   au! CmdlineChanged
-  cunmap <F1>
 
   au! CmdlineEnter : let g:entered = expand('<afile>')
   au! CmdlineLeave : let g:left = expand('<afile>')
@@ -1973,8 +2126,8 @@ endfunc
 " Test for BufUnload autocommand that unloads all the other buffers
 func Test_bufunload_all()
   let g:test_is_flaky = 1
-  call writefile(['Test file Xxx1'], 'Xxx1', 'D')"
-  call writefile(['Test file Xxx2'], 'Xxx2', 'D')"
+  call writefile(['Test file Xxx1'], 'Xxx1', 'D')
+  call writefile(['Test file Xxx2'], 'Xxx2', 'D')
 
   let content =<< trim [CODE]
     func UnloadAllBufs()
@@ -2571,6 +2724,24 @@ func Test_TextChangedI_with_setline()
   call assert_equal('', getline(2))
 
   call test_override('char_avail', 0)
+  bwipe!
+endfunc
+
+func Test_TextChanged_with_norm()
+  " For unknown reason this fails on MS-Windows
+  CheckNotMSWindows
+  CheckFeature terminal
+  let buf = term_start([GetVimProg(), '--clean', '-c', 'set noswapfile'], {'term_rows': 3})
+  call assert_equal('running', term_getstatus(buf))
+  call term_sendkeys(buf, ":let g:a=0\<cr>")
+  call term_wait(buf, 50)
+  call term_sendkeys(buf, ":au! TextChanged * :let g:a+=1\<cr>")
+  call term_wait(buf, 50)
+  call term_sendkeys(buf, ":norm! ia\<cr>")
+  call term_wait(buf, 50)
+  call term_sendkeys(buf, ":echo g:a\<cr>")
+  call term_wait(buf, 50)
+  call WaitForAssert({-> assert_match('^1.*$', term_getline(buf, 3))})
   bwipe!
 endfunc
 
@@ -3406,7 +3577,7 @@ endfunc
 
 func Test_Visual_doautoall_redraw()
   call setline(1, ['a', 'b'])
-  new 
+  new
   wincmd p
   call feedkeys("G\<C-V>", 'txn')
   autocmd User Explode ++once redraw
@@ -3531,44 +3702,6 @@ func Test_autocmd_with_block()
   augroup END
 endfunc
 
-" Test TextChangedI and TextChanged
-func Test_Changed_ChangedI()
-  new
-  call test_override("char_avail", 1)
-  let [g:autocmd_i, g:autocmd_n] = ['','']
-
-  func! TextChangedAutocmdI(char)
-    let g:autocmd_{tolower(a:char)} = a:char .. b:changedtick
-  endfunc
-
-  augroup Test_TextChanged
-    au!
-    au TextChanged  <buffer> :call TextChangedAutocmdI('N')
-    au TextChangedI <buffer> :call TextChangedAutocmdI('I')
-  augroup END
-
-  call feedkeys("ifoo\<esc>", 'tnix')
-  " TODO: Test test does not seem to trigger TextChanged autocommand, this
-  " requires running Vim in a terminal window.
-  " call assert_equal('N3', g:autocmd_n)
-  call assert_equal('I3', g:autocmd_i)
-
-  call feedkeys("yyp", 'tnix')
-  " TODO: Test test does not seem to trigger TextChanged autocommand.
-  " call assert_equal('N4', g:autocmd_n)
-  call assert_equal('I3', g:autocmd_i)
-
-  " CleanUp
-  call test_override("char_avail", 0)
-  au! TextChanged  <buffer>
-  au! TextChangedI <buffer>
-  augroup! Test_TextChanged
-  delfu TextChangedAutocmdI
-  unlet! g:autocmd_i g:autocmd_n
-
-  bw!
-endfunc
-
 func Test_closing_autocmd_window()
   let lines =<< trim END
       edit Xa.txt
@@ -3578,9 +3711,63 @@ func Test_closing_autocmd_window()
   END
   call v9.CheckScriptFailure(lines, 'E814:')
   au! BufEnter
-  only!
   bwipe Xa.txt
   bwipe Xb.txt
+endfunc
+
+func Test_switch_window_in_autocmd_window()
+  edit Xa.txt
+  tabnew Xb.txt
+  autocmd BufEnter Xa.txt wincmd w
+  doautoall BufEnter
+  au! BufEnter
+  bwipe Xa.txt
+  call assert_false(bufexists('Xa.txt'))
+  bwipe Xb.txt
+  call assert_false(bufexists('Xb.txt'))
+endfunc
+
+" Test that using the autocommand window doesn't change current directory.
+func Test_autocmd_window_cwd()
+  let saveddir = getcwd()
+  call mkdir('Xcwd/a/b/c/d', 'pR')
+
+  new Xa.txt
+  tabnew
+  new Xb.txt
+
+  tabprev
+  cd Xcwd
+  call assert_match('/Xcwd$', getcwd())
+  call assert_match('\[global\] .*/Xcwd$', trim(execute('verbose pwd')))
+
+  autocmd BufEnter Xb.txt lcd ./a/b/c/d
+  doautoall BufEnter
+  au! BufEnter
+  call assert_match('/Xcwd$', getcwd())
+  call assert_match('\[global\] .*/Xcwd$', trim(execute('verbose pwd')))
+
+  tabnext
+  cd ./a
+  tcd ./b
+  lcd ./c
+  call assert_match('/Xcwd/a/b/c$', getcwd())
+  call assert_match('\[window\] .*/Xcwd/a/b/c$', trim(execute('verbose pwd')))
+
+  autocmd BufEnter Xa.txt call assert_match('Xcwd/a/b/c$', getcwd())
+  doautoall BufEnter
+  au! BufEnter
+  call assert_match('/Xcwd/a/b/c$', getcwd())
+  call assert_match('\[window\] .*/Xcwd/a/b/c$', trim(execute('verbose pwd')))
+  bwipe!
+  call assert_match('/Xcwd/a/b$', getcwd())
+  call assert_match('\[tabpage\] .*/Xcwd/a/b$', trim(execute('verbose pwd')))
+  bwipe!
+  call assert_match('/Xcwd/a$', getcwd())
+  call assert_match('\[global\] .*/Xcwd/a$', trim(execute('verbose pwd')))
+  bwipe!
+
+  call chdir(saveddir)
 endfunc
 
 func Test_bufwipeout_changes_window()
@@ -3620,7 +3807,7 @@ endfunc
 " Test for ModeChanged pattern
 func Test_mode_changes()
   let g:index = 0
-  let g:mode_seq = ['n', 'i', 'n', 'v', 'V', 'i', 'ix', 'i', 'ic', 'i', 'n', 'no', 'n', 'V', 'v', 's', 'n']
+  let g:mode_seq = ['n', 'i', 'n', 'v', 'V', 'i', 'ix', 'i', 'ic', 'i', 'n', 'no', 'noV', 'n', 'V', 'v', 's', 'n']
   func! TestMode()
     call assert_equal(g:mode_seq[g:index], get(v:event, "old_mode"))
     call assert_equal(g:mode_seq[g:index + 1], get(v:event, "new_mode"))
@@ -3631,7 +3818,7 @@ func Test_mode_changes()
   au ModeChanged * :call TestMode()
   let g:n_to_any = 0
   au ModeChanged n:* let g:n_to_any += 1
-  call feedkeys("i\<esc>vVca\<CR>\<C-X>\<C-L>\<esc>ggdG", 'tnix')
+  call feedkeys("i\<esc>vVca\<CR>\<C-X>\<C-L>\<esc>ggdV\<MouseMove>G", 'tnix')
 
   let g:V_to_v = 0
   au ModeChanged V:v let g:V_to_v += 1
@@ -3688,8 +3875,6 @@ func Test_mode_changes()
   call assert_equal(len(g:mode_seq) - 1, g:index)
   call assert_equal(2, g:n_to_c)
   call assert_equal(2, g:c_to_n)
-  unlet g:n_to_c
-  unlet g:c_to_n
 
   let g:n_to_v = 0
   au ModeChanged n:v let g:n_to_v += 1
@@ -3700,8 +3885,10 @@ func Test_mode_changes()
   call assert_equal(len(g:mode_seq) - 1, g:index)
   call assert_equal(1, g:n_to_v)
   call assert_equal(1, g:v_to_n)
-  unlet g:n_to_v
-  unlet g:v_to_n
+
+  let g:mode_seq += ['c', 'cr', 'c', 'cr', 'n']
+  call feedkeys(":\<Insert>\<Insert>\<Insert>\<CR>", 'tnix')
+  call assert_equal(len(g:mode_seq) - 1, g:index)
 
   au! ModeChanged
   delfunc TestMode
@@ -3716,6 +3903,10 @@ func Test_mode_changes()
   unlet! g:i_to_n
   unlet! g:nori_to_any
   unlet! g:i_to_any
+  unlet! g:n_to_c
+  unlet! g:c_to_n
+  unlet! g:n_to_v
+  unlet! g:v_to_n
 endfunc
 
 func Test_recursive_ModeChanged()
@@ -4121,7 +4312,7 @@ endfunc
 
 func Test_autocmd_split_dummy()
   " Autocommand trying to split a window containing a dummy buffer.
-  auto BufReadPre * exe "sbuf " .. expand("<abuf>") 
+  auto BufReadPre * exe "sbuf " .. expand("<abuf>")
   " Avoid the "W11" prompt
   au FileChangedShell * let v:fcs_choice = 'reload'
   func Xautocmd_changelist()
@@ -4166,6 +4357,7 @@ func SetupVimTest_shm()
   let g:bwe = []
   let g:brp = []
   set shortmess+=F
+  messages clear
 
   let dirname='XVimTestSHM'
   call mkdir(dirname, 'R')
@@ -4216,6 +4408,290 @@ func Test_autocmd_shortmess()
   call assert_equal(3, bytes->len())
 
   delfunc SetupVimTest_shm
+endfunc
+
+func Test_autocmd_invalidates_undo_on_textchanged()
+  CheckRunVimInTerminal
+  let script =<< trim END
+    set hidden
+    " create quickfix list (at least 2 lines to move line)
+    vimgrep /u/j %
+
+    " enter quickfix window
+    cwindow
+
+    " set modifiable
+    setlocal modifiable
+
+    " set autocmd to clear quickfix list
+
+    autocmd! TextChanged <buffer> call setqflist([])
+    " move line
+    move+1
+  END
+  call writefile(script, 'XTest_autocmd_invalidates_undo_on_textchanged', 'D')
+  let buf = RunVimInTerminal('XTest_autocmd_invalidates_undo_on_textchanged', {'rows': 20})
+  call term_sendkeys(buf, ":so %\<cr>")
+  call term_sendkeys(buf, "G")
+  call WaitForAssert({-> assert_match('^XTest_autocmd_invalidates_undo_on_textchanged\s*$', term_getline(buf, 20))}, 1000)
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_autocmd_creates_new_buffer_on_bufleave()
+  e a.txt
+  e b.txt
+  setlocal bufhidden=wipe
+  autocmd BufLeave <buffer> diffsplit c.txt
+  bn
+  call assert_equal(1, winnr('$'))
+  call assert_equal('a.txt', bufname('%'))
+  bw a.txt
+  bw c.txt
+endfunc
+
+" Ensure `expected` was just recently written as a Vim session
+func s:assert_session_path(expected)
+  call assert_equal(a:expected, v:this_session)
+endfunc
+
+" Check for `expected` after a session is written to-disk.
+func s:watch_for_session_path(expected)
+  execute 'autocmd SessionWritePost * ++once execute "call s:assert_session_path(\"'
+        \ . a:expected
+        \ . '\")"'
+endfunc
+
+" Ensure v:this_session gets the full session path, if explicitly stated
+func Test_explicit_session_absolute_path()
+  %bwipeout!
+
+  let directory = getcwd()
+
+  let v:this_session = ""
+  let name = "some_file.vim"
+  let expected = fnamemodify(name, ":p")
+  call s:watch_for_session_path(expected)
+  execute "mksession! " .. expected
+
+  call delete(expected)
+endfunc
+
+" Ensure v:this_session gets the full session path, if explicitly stated
+func Test_explicit_session_relative_path()
+  %bwipeout!
+
+  let directory = getcwd()
+
+  let v:this_session = ""
+  let name = "some_file.vim"
+  let expected = fnamemodify(name, ":p")
+  call s:watch_for_session_path(expected)
+  execute "mksession! " .. name
+
+  call delete(expected)
+endfunc
+
+" Ensure v:this_session gets the full session path, if not specified
+func Test_implicit_session()
+  %bwipeout!
+
+  let directory = getcwd()
+
+  let v:this_session = ""
+  let expected = fnamemodify("Session.vim", ":p")
+  call s:watch_for_session_path(expected)
+  mksession!
+
+  call delete(expected)
+endfunc
+
+" Test TextChangedI and TextChanged
+func Test_Changed_ChangedI()
+  " Run this test in a terminal because it requires running the main loop.
+  " Don't use CheckRunVimInTerminal as that will skip the test on Windows.
+  CheckFeature terminal
+  CheckNotGui
+  " Starting a terminal to run Vim is always considered flaky.
+  let g:test_is_flaky = 1
+
+  call writefile(['one', 'two', 'three'], 'XTextChangedI2', 'D')
+  let before =<< trim END
+      set ttimeout ttimeoutlen=10
+      let [g:autocmd_n, g:autocmd_i] = ['','']
+
+      func TextChangedAutocmd(char)
+        let g:autocmd_{tolower(a:char)} = a:char .. b:changedtick
+        call writefile([$'{g:autocmd_n},{g:autocmd_i}'], 'XTextChangedI3')
+      endfunc
+
+      au TextChanged  <buffer> :call TextChangedAutocmd('N')
+      au TextChangedI <buffer> :call TextChangedAutocmd('I')
+
+      nnoremap <CR> o<Esc>
+      autocmd SafeState * ++once call writefile([''], 'XTextChangedI3')
+  END
+
+  call writefile(before, 'Xinit', 'D')
+  let buf = term_start(
+        \ GetVimCommandCleanTerm() .. '-n -S Xinit XTextChangedI2',
+        \ {'term_rows': 10})
+  call assert_equal('running', term_getstatus(buf))
+  call WaitForAssert({-> assert_true(filereadable('XTextChangedI3'))})
+  defer delete('XTextChangedI3')
+  call WaitForAssert({-> assert_equal([''], readfile('XTextChangedI3'))})
+
+  " TextChanged should trigger if a mapping enters and leaves Insert mode.
+  call term_sendkeys(buf, "\<CR>")
+  call WaitForAssert({-> assert_equal('N4,', readfile('XTextChangedI3')->join("\n"))})
+
+  call term_sendkeys(buf, "i")
+  call WaitForAssert({-> assert_match('^-- INSERT --', term_getline(buf, 10))})
+  call WaitForAssert({-> assert_equal('N4,', readfile('XTextChangedI3')->join("\n"))})
+  " TextChangedI should trigger if change is done in Insert mode.
+  call term_sendkeys(buf, "f")
+  call WaitForAssert({-> assert_equal('N4,I5', readfile('XTextChangedI3')->join("\n"))})
+  call term_sendkeys(buf, "o")
+  call WaitForAssert({-> assert_equal('N4,I6', readfile('XTextChangedI3')->join("\n"))})
+  call term_sendkeys(buf, "o")
+  call WaitForAssert({-> assert_equal('N4,I7', readfile('XTextChangedI3')->join("\n"))})
+  " TextChanged shouldn't trigger when leaving Insert mode and TextChangedI
+  " has been triggered.
+  call term_sendkeys(buf, "\<Esc>")
+  call WaitForAssert({-> assert_notmatch('^-- INSERT --', term_getline(buf, 10))})
+  call WaitForAssert({-> assert_equal('N4,I7', readfile('XTextChangedI3')->join("\n"))})
+
+  " TextChanged should trigger if change is done in Normal mode.
+  call term_sendkeys(buf, "yyp")
+  call WaitForAssert({-> assert_equal('N8,I7', readfile('XTextChangedI3')->join("\n"))})
+
+  " TextChangedI shouldn't trigger if change isn't done in Insert mode.
+  call term_sendkeys(buf, "i")
+  call WaitForAssert({-> assert_match('^-- INSERT --', term_getline(buf, 10))})
+  call WaitForAssert({-> assert_equal('N8,I7', readfile('XTextChangedI3')->join("\n"))})
+  call term_sendkeys(buf, "\<Esc>")
+  call WaitForAssert({-> assert_notmatch('^-- INSERT --', term_getline(buf, 10))})
+  call WaitForAssert({-> assert_equal('N8,I7', readfile('XTextChangedI3')->join("\n"))})
+
+  " TextChangedI should trigger if change is a mix of Normal and Insert modes.
+  func! s:validate_mixed_textchangedi(buf, keys)
+    let buf = a:buf
+    call term_sendkeys(buf, "ifoo")
+    call WaitForAssert({-> assert_match('^-- INSERT --', term_getline(buf, 10))})
+    call term_sendkeys(buf, "\<Esc>")
+    call WaitForAssert({-> assert_notmatch('^-- INSERT --', term_getline(buf, 10))})
+    call term_sendkeys(buf, ":let [g:autocmd_n, g:autocmd_i] = ['', '']\<CR>")
+    call writefile([], 'XTextChangedI3')
+    call term_sendkeys(buf, a:keys)
+    call WaitForAssert({-> assert_match('^-- INSERT --', term_getline(buf, 10))})
+    call WaitForAssert({-> assert_match('^,I\d\+', readfile('XTextChangedI3')->join("\n"))})
+    call term_sendkeys(buf, "\<Esc>")
+    call WaitForAssert({-> assert_notmatch('^-- INSERT --', term_getline(buf, 10))})
+    call WaitForAssert({-> assert_match('^,I\d\+', readfile('XTextChangedI3')->join("\n"))})
+  endfunc
+
+  call s:validate_mixed_textchangedi(buf, "o")
+  call s:validate_mixed_textchangedi(buf, "O")
+  call s:validate_mixed_textchangedi(buf, "ciw")
+  call s:validate_mixed_textchangedi(buf, "cc")
+  call s:validate_mixed_textchangedi(buf, "C")
+  call s:validate_mixed_textchangedi(buf, "s")
+  call s:validate_mixed_textchangedi(buf, "S")
+
+  " clean up
+  bwipe!
+endfunc
+
+" Test that filetype detection still works when SwapExists autocommand sets
+" filetype in another buffer.
+func Test_SwapExists_set_other_buf_filetype()
+  let lines =<< trim END
+    set nocompatible directory=.
+    filetype on
+
+    let g:buf = bufnr()
+    new
+
+    func SwapExists()
+      let v:swapchoice = 'o'
+      call setbufvar(g:buf, '&filetype', 'text')
+    endfunc
+
+    func SafeState()
+      edit <script>
+      redir! > XftSwapExists.out
+        set readonly? filetype?
+      redir END
+      qall!
+    endfunc
+
+    autocmd SwapExists * ++nested call SwapExists()
+    autocmd SafeState * ++nested ++once call SafeState()
+  END
+  call writefile(lines, 'XftSwapExists.vim', 'D')
+
+  new XftSwapExists.vim
+  if RunVim('', '', ' -S XftSwapExists.vim')
+    call assert_equal(
+          \ ['', '  readonly', '  filetype=vim'],
+          \ readfile('XftSwapExists.out'))
+    call delete('XftSwapExists.out')
+  endif
+
+  bwipe!
+endfunc
+
+" Test that file is not marked as modified when SwapExists autocommand sets
+" 'modified' in another buffer.
+func Test_SwapExists_set_other_buf_modified()
+  let lines =<< trim END
+    set nocompatible directory=.
+
+    let g:buf = bufnr()
+    new
+
+    func SwapExists()
+      let v:swapchoice = 'o'
+      call setbufvar(g:buf, '&modified', 1)
+    endfunc
+
+    func SafeState()
+      edit <script>
+      redir! > XmodSwapExists.out
+        set readonly? modified?
+      redir END
+      qall!
+    endfunc
+
+    autocmd SwapExists * ++nested call SwapExists()
+    autocmd SafeState * ++nested ++once call SafeState()
+  END
+  call writefile(lines, 'XmodSwapExists.vim', 'D')
+
+  new XmodSwapExists.vim
+  if RunVim('', '', ' -S XmodSwapExists.vim')
+    call assert_equal(
+          \ ['', '  readonly', 'nomodified'],
+          \ readfile('XmodSwapExists.out'))
+    call delete('XmodSwapExists.out')
+  endif
+
+  bwipe!
+endfunc
+
+func Test_BufEnter_botline()
+  set hidden
+  call writefile(range(10), 'Xxx1', 'D')
+  call writefile(range(20), 'Xxx2', 'D')
+  edit Xxx1
+  edit Xxx2
+  au BufEnter Xxx1 call assert_true(line('w$') > 1)
+  edit Xxx1
+
+  bwipe! Xxx1
+  bwipe! Xxx2
+  au! BufEnter Xxx1
+  set hidden&vim
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

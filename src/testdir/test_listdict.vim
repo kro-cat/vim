@@ -60,6 +60,9 @@ func Test_list_slice()
       assert_equal([1, 2], l[-3 : -1])
   END
   call v9.CheckDefAndScriptSuccess(lines)
+
+  call assert_fails('let l[[]] = 1', 'E730: Using a List as a String')
+  call assert_fails('let l[1 : []] = [1]', 'E730: Using a List as a String')
 endfunc
 
 " List identity
@@ -178,6 +181,19 @@ func Test_list_assign()
   END
   call v9.CheckScriptFailure(['vim9script'] + lines, 'E688:')
   call v9.CheckDefExecFailure(lines, 'E1093: Expected 2 items but got 1')
+
+  let lines =<< trim END
+    VAR l = [2]
+    LET l += test_null_list()
+    call assert_equal([2], l)
+    LET l = test_null_list()
+    LET l += [1]
+    call assert_equal([1], l)
+  END
+  call v9.CheckLegacyAndVim9Success(lines)
+
+  let d = {'abc': [1, 2, 3]}
+  call assert_fails('let d.abc[0:0z10] = [10, 20]', 'E976: Using a Blob as a String')
 endfunc
 
 " test for range assign
@@ -373,7 +389,7 @@ func Test_dict_big()
   endtry
   call assert_equal('Vim(let):E716: "1500"', str)
 
-  " lookup each items
+  " lookup each item
   for i in range(1500)
     call assert_equal(3000 - i, d[i])
   endfor
@@ -435,18 +451,21 @@ func Test_dict_assign()
     let n = 0
     let n.key = 3
   END
-  call v9.CheckScriptFailure(lines, 'E1203: Dot can only be used on a dictionary: n.key = 3')
+  call v9.CheckScriptFailure(lines, 'E1203: Dot not allowed after a number: n.key = 3')
   let lines =<< trim END
     vim9script
     var n = 0
     n.key = 3
   END
-  call v9.CheckScriptFailure(lines, 'E1203: Dot can only be used on a dictionary: n.key = 3')
+  call v9.CheckScriptFailure(lines, 'E1203: Dot not allowed after a number: n.key = 3')
   let lines =<< trim END
     var n = 0
     n.key = 3
   END
   call v9.CheckDefFailure(lines, 'E1141:')
+
+  let d = {'abc': {}}
+  call assert_fails("let d.abc[0z10] = 10", 'E976: Using a Blob as a String')
 endfunc
 
 " Function in script-local List or Dict
@@ -516,7 +535,7 @@ func Test_dict_func_remove()
       var d = {1: 'a', 3: 'c'}
       call remove(d, [])
   END
-  call v9.CheckDefExecFailure(lines, 'E1013: Argument 2: type mismatch, expected string but got list<unknown>')
+  call v9.CheckDefExecFailure(lines, 'E1013: Argument 2: type mismatch, expected string but got list<any>')
 endfunc
 
 " Nasty: remove func from Dict that's being called (works)
@@ -981,7 +1000,7 @@ func Test_reverse_sort_uniq()
   END
   call v9.CheckLegacyAndVim9Success(lines)
 
-  call assert_fails('call reverse("")', 'E899:')
+  call assert_fails('call reverse({})', 'E1252:')
   call assert_fails('call uniq([1, 2], {x, y -> []})', 'E745:')
   call assert_fails("call sort([1, 2], function('min'), 1)", "E1206:")
   call assert_fails("call sort([1, 2], function('invalid_func'))", "E700:")
@@ -1037,6 +1056,10 @@ func Test_reduce()
       call assert_equal('Å,s,t,r,ö,m', reduce('Åström', LSTART acc, val LMIDDLE acc .. ',' .. val LEND))
       call assert_equal('Å,s,t,r,ö,m', reduce('Åström', LSTART acc, val LMIDDLE acc .. ',' .. val LEND))
       call assert_equal(',a,b,c', reduce('abc', LSTART acc, val LMIDDLE acc .. ',' .. val LEND, test_null_string()))
+
+      call assert_equal(0x7d, reduce([0x30, 0x25, 0x08, 0x61], 'or'))
+      call assert_equal(0x7d, reduce(0z30250861, 'or'))
+      call assert_equal('β', reduce('ββββ', 'matchstr'))
   END
   call v9.CheckLegacyAndVim9Success(lines)
 
@@ -1052,7 +1075,7 @@ func Test_reduce()
 
   call assert_fails("call reduce({}, { acc, val -> acc + val }, 1)", 'E1098:')
   call assert_fails("call reduce(0, { acc, val -> acc + val }, 1)", 'E1098:')
-  call assert_fails("call reduce([1, 2], 'Xdoes_not_exist')", 'E121:')
+  call assert_fails("call reduce([1, 2], 'Xdoes_not_exist')", 'E117:')
   call assert_fails("echo reduce(0z01, { acc, val -> 2 * acc + val }, '')", 'E1210:')
 
   call assert_fails("vim9 reduce(0, (acc, val) => (acc .. val), '')", 'E1252:')
@@ -1238,11 +1261,15 @@ func Test_listdict_extendnew()
   let l = [1, 2, 3]
   call assert_equal([1, 2, 3, 4, 5], extendnew(l, [4, 5]))
   call assert_equal([1, 2, 3], l)
+  lockvar l
+  call assert_equal([1, 2, 3, 4, 5], extendnew(l, [4, 5]))
 
-  " Test extend() with dictionaries.
+  " Test extendnew() with dictionaries.
   let d = {'a': {'b': 'B'}}
   call assert_equal({'a': {'b': 'B'}, 'c': 'cc'}, extendnew(d, {'c': 'cc'}))
   call assert_equal({'a': {'b': 'B'}}, d)
+  lockvar d
+  call assert_equal({'a': {'b': 'B'}, 'c': 'cc'}, extendnew(d, {'c': 'cc'}))
 endfunc
 
 func s:check_scope_dict(x, fixed)
@@ -1380,7 +1407,7 @@ func Test_listdict_index()
   call v9.CheckLegacyAndVim9Failure(['VAR l = [1, 2, 3]', 'LET l[1.1] = 4'], ['E805:', 'E1012:', 'E805:'])
   call v9.CheckLegacyAndVim9Failure(['VAR l = [1, 2, 3]', 'LET l[: i] = [4, 5]'], ['E121:', 'E1001:', 'E121:'])
   call v9.CheckLegacyAndVim9Failure(['VAR l = [1, 2, 3]', 'LET l[: 3.2] = [4, 5]'], ['E805:', 'E1012:', 'E805:'])
-  call v9.CheckLegacyAndVim9Failure(['VAR t = test_unknown()', 'echo t[0]'], 'E685:')
+  call v9.CheckLegacyAndVim9Failure(['VAR t = test_unknown()', 'echo t[0]'], ['E340:', 'E909:', 'E340:', 'E685:'])
 endfunc
 
 " Test for a null list
@@ -1497,6 +1524,8 @@ func Test_indexof()
   call assert_equal(-1, indexof(test_null_list(), {i, v -> v == 'a'}))
   call assert_equal(-1, indexof(l, test_null_string()))
   call assert_equal(-1, indexof(l, test_null_function()))
+  call assert_equal(-1, indexof(l, ""))
+  call assert_fails('let i = indexof(l, " ")', 'E15:')
 
   " failure cases
   call assert_fails('let i = indexof(l, "v:val == ''cyan''")', 'E735:')
@@ -1520,6 +1549,12 @@ func Test_indexof()
   endfunc
   call assert_fails('let i = indexof(l, function("TestIdx"))', 'E605:')
   delfunc TestIdx
+endfunc
+
+func Test_extendnew_leak()
+  " This used to leak memory
+  for i in range(100) | silent! call extendnew([], [], []) | endfor
+  for i in range(100) | silent! call extendnew({}, {}, {}) | endfor
 endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

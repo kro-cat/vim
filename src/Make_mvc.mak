@@ -157,9 +157,54 @@
 # you can set DEFINES on the command line, e.g.,
 #	nmake -f Make_mvc.mvc "DEFINES=-DEMACS_TAGS"
 
+RM=		del /f /q
+PS=		powershell.exe
+
+PSFLAGS=	-NoLogo -NoProfile -Command
+
+!IF ![$(PS) $(PSFLAGS) try{Out-File -FilePath '.\major.tmp' -InputObject \
+	\"MAJOR=$$(((Select-String -Pattern 'VIM_VERSION_MAJOR\s+\d{1,2}' \
+	-Path '.\version.h').Line[-2..-1^]-join '').Trim())\"} \
+	catch{exit 1}]
+! INCLUDE .\major.tmp
+! IF [$(RM) .\major.tmp]
+! ENDIF
+!ELSE
+# Change this value for the new version
+MAJOR=		9
+!ENDIF
+
+!IF ![$(PS) $(PSFLAGS) try{Out-File -FilePath '.\minor.tmp' -InputObject \
+	\"MINOR=$$(((Select-String -Pattern 'VIM_VERSION_MINOR\s+\d{1,2}' \
+	-Path '.\version.h').Line[-2..-1^]-join '').Trim())\"} \
+	catch{exit 1}]
+! INCLUDE .\minor.tmp
+! IF [$(RM) .\minor.tmp]
+! ENDIF
+!ELSE
+# Change this value for the new version
+MINOR=		1
+!ENDIF
+
+!IF ![$(PS) $(PSFLAGS) try{Out-File -FilePath '.\patchlvl.tmp' -InputObject \
+	\"PATCHLEVEL=$$([decimal^]((Get-Content -Path '.\version.c' \
+	-TotalCount ((Select-String -Pattern 'static int included_patches' \
+	-Path '.\version.c').LineNumber+3))[-1^]).Trim().TrimEnd(','))\"} \
+	catch{exit 1}]
+! INCLUDE .\patchlvl.tmp
+! IF [$(RM) .\patchlvl.tmp]
+! ENDIF
+!ENDIF
+
+
 # Build on Windows NT/XP
 
 TARGETOS = WINNT
+
+!IFDEF PATCHLEVEL
+RCFLAGS=	-DVIM_VERSION_PATCHLEVEL=$(PATCHLEVEL)
+!ENDIF
+
 
 !if "$(VIMDLL)" == "yes"
 GUI = yes
@@ -374,9 +419,9 @@ DYNAMIC_SODIUM = yes
 
 !if "$(SODIUM)" != "no"
 ! if "$(CPU)" == "AMD64"
-SOD_LIB		= $(SODIUM)\x64\Release\v140\dynamic
+SOD_LIB		= $(SODIUM)\x64\Release\v143\dynamic
 ! elseif "$(CPU)" == "i386"
-SOD_LIB		= $(SODIUM)\Win32\Release\v140\dynamic
+SOD_LIB		= $(SODIUM)\Win32\Release\v143\dynamic
 ! else
 SODIUM = no
 ! endif
@@ -420,7 +465,6 @@ NBDEBUG_DEFS	= -DNBDEBUG
 NBDEBUG_INCL	= nbdebug.h
 NBDEBUG_SRC	= nbdebug.c
 !  endif
-NETBEANS_LIB	= WSock32.lib
 ! endif
 
 # DirectWrite (DirectX)
@@ -473,7 +517,7 @@ CHANNEL_PRO	= proto/job.pro proto/channel.pro
 CHANNEL_OBJ	= $(OBJDIR)/job.obj $(OBJDIR)/channel.obj
 CHANNEL_DEFS	= -DFEAT_JOB_CHANNEL -DFEAT_IPV6 -DHAVE_INET_NTOP
 
-NETBEANS_LIB	= WSock32.lib Ws2_32.lib
+NETBEANS_LIB	= Ws2_32.lib
 !endif
 
 # need advapi32.lib for GetUserName()
@@ -592,7 +636,7 @@ OPTFLAG = $(OPTFLAG) /GL
 ! endif
 
 CFLAGS = $(CFLAGS) $(OPTFLAG) -DNDEBUG $(CPUARG)
-RCFLAGS = -DNDEBUG
+RCFLAGS = $(RCFLAGS) -DNDEBUG
 ! ifdef USE_MSVCRT
 CFLAGS = $(CFLAGS) /MD
 LIBC = msvcrt.lib
@@ -608,7 +652,7 @@ VIM = vimd
 DEBUGINFO = /ZI
 ! endif
 CFLAGS = $(CFLAGS) -D_DEBUG -DDEBUG /Od
-RCFLAGS = -D_DEBUG -DDEBUG
+RCFLAGS = $(RCFLAGS) -D_DEBUG -DDEBUG
 # The /fixed:no is needed for Quantify.
 LIBC = /fixed:no
 ! ifdef USE_MSVCRT
@@ -622,7 +666,7 @@ LIBC = $(LIBC) libcmtd.lib
 !endif # DEBUG
 
 # Visual Studio 2005 has 'deprecated' many of the standard CRT functions
-CFLAGS_DEPR = /D_CRT_SECURE_NO_DEPRECATE /D_CRT_NONSTDC_NO_DEPRECATE
+CFLAGS_DEPR = -D_CRT_SECURE_NO_DEPRECATE -D_CRT_NONSTDC_NO_DEPRECATE
 CFLAGS = $(CFLAGS) $(CFLAGS_DEPR)
 
 !include Make_all.mak
@@ -674,6 +718,7 @@ OBJ = \
 	$(OUTDIR)\float.obj \
 	$(OUTDIR)\fold.obj \
 	$(OUTDIR)\getchar.obj \
+	$(OUTDIR)\gc.obj \
 	$(OUTDIR)\gui_xim.obj \
 	$(OUTDIR)\hardcopy.obj \
 	$(OUTDIR)\hashtab.obj \
@@ -879,7 +924,7 @@ TCL_LIB = "$(TCL)\lib\tclstub$(TCL_VER).lib"
 CFLAGS  = $(CFLAGS) -DFEAT_TCL
 TCL_OBJ	= $(OUTDIR)\if_tcl.obj
 TCL_INC	= /I "$(TCL)\Include" /I "$(TCL)"
-TCL_LIB = $(TCL)\lib\tcl$(TCL_VER)vc.lib
+TCL_LIB = "$(TCL)\lib\tcl$(TCL_VER)vc.lib"
 ! endif
 !endif
 
@@ -928,7 +973,7 @@ CFLAGS = $(CFLAGS) -DDYNAMIC_PYTHON \
 		-DDYNAMIC_PYTHON_DLL=\"python$(PYTHON_VER).dll\"
 PYTHON_LIB = /nodefaultlib:python$(PYTHON_VER).lib
 ! else
-PYTHON_LIB = $(PYTHON)\libs\python$(PYTHON_VER).lib
+PYTHON_LIB = "$(PYTHON)\libs\python$(PYTHON_VER).lib"
 ! endif
 !endif
 
@@ -937,8 +982,13 @@ PYTHON_LIB = $(PYTHON)\libs\python$(PYTHON_VER).lib
 ! ifndef PYTHON3_VER
 PYTHON3_VER = 36
 ! endif
+! if "$(DYNAMIC_PYTHON3_STABLE_ABI)" == "yes"
+PYTHON3_NAME = python3
+! else
+PYTHON3_NAME = python$(PYTHON3_VER)
+! endif
 ! ifndef DYNAMIC_PYTHON3_DLL
-DYNAMIC_PYTHON3_DLL = python$(PYTHON3_VER).dll
+DYNAMIC_PYTHON3_DLL = $(PYTHON3_NAME).dll
 ! endif
 ! message Python3 requested (version $(PYTHON3_VER)) - root dir is "$(PYTHON3)"
 ! if "$(DYNAMIC_PYTHON3)" == "yes"
@@ -950,10 +1000,14 @@ PYTHON3_INC = /I "$(PYTHON3)\Include" /I "$(PYTHON3)\PC"
 ! if "$(DYNAMIC_PYTHON3)" == "yes"
 CFLAGS = $(CFLAGS) -DDYNAMIC_PYTHON3 \
 		-DDYNAMIC_PYTHON3_DLL=\"$(DYNAMIC_PYTHON3_DLL)\"
-PYTHON3_LIB = /nodefaultlib:python$(PYTHON3_VER).lib
+!  if "$(DYNAMIC_PYTHON3_STABLE_ABI)" == "yes"
+CFLAGS = $(CFLAGS) -DDYNAMIC_PYTHON3_STABLE_ABI
+PYTHON3_INC = $(PYTHON3_INC) -DPy_LIMITED_API=0x3080000
+!  endif
+PYTHON3_LIB = /nodefaultlib:$(PYTHON3_NAME).lib
 ! else
 CFLAGS = $(CFLAGS) -DPYTHON3_DLL=\"$(DYNAMIC_PYTHON3_DLL)\"
-PYTHON3_LIB = $(PYTHON3)\libs\python$(PYTHON3_VER).lib
+PYTHON3_LIB = "$(PYTHON3)\libs\$(PYTHON3_NAME).lib"
 ! endif
 !endif
 
@@ -1111,7 +1165,7 @@ RUBY_INSTALL_NAME = x64-$(RUBY_MSVCRT_NAME)-ruby$(RUBY_API_VER)
 CFLAGS = $(CFLAGS) -DFEAT_RUBY
 RUBY_OBJ = $(OUTDIR)\if_ruby.obj
 RUBY_INC = /I "$(RUBY)\include\ruby-$(RUBY_API_VER_LONG)" /I "$(RUBY)\include\ruby-$(RUBY_API_VER_LONG)\$(RUBY_PLATFORM)"
-RUBY_LIB = $(RUBY)\lib\$(RUBY_INSTALL_NAME).lib
+RUBY_LIB = "$(RUBY)\lib\$(RUBY_INSTALL_NAME).lib"
 # Do we want to load Ruby dynamically?
 ! if "$(DYNAMIC_RUBY)" == "yes"
 !  message Ruby DLL will be loaded dynamically
@@ -1264,9 +1318,13 @@ $(XPM_OBJ) $(OUTDIR)\version.obj $(LINKARGS2)
 $(VIM): $(VIM).exe
 
 $(OUTDIR):
-	if not exist $(OUTDIR)/nul  mkdir $(OUTDIR)
+	if not exist $(OUTDIR)/nul  mkdir $(OUTDIR:/=\)
 
 CFLAGS_INST = /nologo /O2 -DNDEBUG -DWIN32 -DWINVER=$(WINVER) -D_WIN32_WINNT=$(WINVER) $(CFLAGS_DEPR)
+
+!IFDEF PATCHLEVEL
+CFLAGS_INST=	$(CFLAGS_INST) -DVIM_VERSION_PATCHLEVEL=$(PATCHLEVEL)
+!ENDIF
 
 install.exe: dosinst.c dosinst.h version.h
 	$(CC) $(CFLAGS_INST) dosinst.c kernel32.lib shell32.lib \
@@ -1517,6 +1575,8 @@ $(OUTDIR)/float.obj:	$(OUTDIR) float.c  $(INCL)
 $(OUTDIR)/fold.obj:	$(OUTDIR) fold.c  $(INCL)
 
 $(OUTDIR)/getchar.obj:	$(OUTDIR) getchar.c  $(INCL)
+
+$(OUTDIR)/gc.obj:	$(OUTDIR) gc.c  $(INCL)
 
 $(OUTDIR)/gui_xim.obj:	$(OUTDIR) gui_xim.c  $(INCL)
 
@@ -1858,6 +1918,7 @@ proto.h: \
 	proto/findfile.pro \
 	proto/float.pro \
 	proto/getchar.pro \
+	proto/gc.pro \
 	proto/gui_xim.pro \
 	proto/hardcopy.pro \
 	proto/hashtab.pro \

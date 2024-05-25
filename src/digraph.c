@@ -853,6 +853,7 @@ static digr_T digraphdefault[] = {
 	{'1', '\'', 0x2032},
 	{'2', '\'', 0x2033},
 	{'3', '\'', 0x2034},
+	{'4', '\'', 0x2057},
 	{'1', '"', 0x2035},
 	{'2', '"', 0x2036},
 	{'3', '"', 0x2037},
@@ -1682,7 +1683,7 @@ registerdigraph(int char1, int char2, int n)
     }
 
     // Add a new digraph to the table.
-    if (ga_grow(&user_digraphs, 1) != OK)
+    if (ga_grow(&user_digraphs, 1) == FAIL)
 	return;
 
     dp = (digr_T *)user_digraphs.ga_data + user_digraphs.ga_len;
@@ -2093,7 +2094,8 @@ f_digraph_get(typval_T *argvars, typval_T *rettv)
 
     if (has_mbyte)
 	buf[(*mb_char2bytes)(code, buf)] = NUL;
-    else {
+    else
+    {
 	buf[0] = code;
 	buf[1] = NUL;
     }
@@ -2313,7 +2315,7 @@ ex_loadkeymap(exarg_T *eap)
      */
     for (;;)
     {
-	line = eap->getline(0, eap->cookie, 0, TRUE);
+	line = eap->ea_getline(0, eap->cookie, 0, TRUE);
 	if (line == NULL)
 	    break;
 

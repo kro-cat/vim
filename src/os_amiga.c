@@ -27,19 +27,19 @@
 #ifndef PROTO
 
 #ifndef LATTICE
-# include <exec/types.h>
 # include <exec/exec.h>
-# include <libraries/dos.h>
 # include <intuition/intuition.h>
 #endif
 
 // XXX These are included from os_amiga.h
+// #include <exec/types.h>
+// #include <libraries/dos.h>
+// #include <libraries/dosextens.h>
 // #include <proto/exec.h>
 // #include <proto/dos.h>
 // #include <proto/intuition.h>
 
 #include <exec/memory.h>
-#include <libraries/dosextens.h>
 
 #include <dos/dostags.h>	    // for 2.0 functions
 #include <dos/dosasl.h>
@@ -691,7 +691,7 @@ mch_get_user_name(char_u *s, int len)
     void
 mch_get_host_name(char_u *s, int len)
 {
-#if defined(__amigaos4__) && defined(__CLIB2__)
+#if !defined(__AROS__)
     gethostname(s, len);
 #else
     vim_strncpy(s, "Amiga", len - 1);
@@ -921,8 +921,8 @@ mch_can_exe(char_u *name, char_u **path UNUSED, int use_path)
 	struct PathNode *head = DupCmdPathList(NULL);
 
 	// For each entry, recur to check for executable.
-	for(struct PathNode *tail = head; !exe && tail;
-		tail = (struct PathNode *) BADDR(tail->pn_Next))
+	for (struct PathNode *tail = head; !exe && tail;
+			       tail = (struct PathNode *) BADDR(tail->pn_Next))
 	{
 	    SetCurrentDir(tail->pn_Lock);
 	    exe = mch_can_exe(name, path, 0);
@@ -1250,7 +1250,8 @@ dos_packet(
     // Allocate space for a packet, make it public and clear it
     packet = (struct StandardPacket *)
 	AllocMem((long) sizeof(struct StandardPacket), MEMF_PUBLIC | MEMF_CLEAR);
-    if (!packet) {
+    if (!packet)
+    {
 	DeletePort(replyport);
 	return (0);
     }

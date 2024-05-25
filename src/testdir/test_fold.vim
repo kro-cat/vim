@@ -456,7 +456,7 @@ func Test_move_folds_around_manual()
   %foldopen!
   13m7
   call Check_foldlevels([1, 2, 2, 2, 1, 2, 2, 1, 1, 1, 2, 2, 2, 1, 0])
-  
+
   bw!
 endfunc
 
@@ -705,7 +705,7 @@ func Test_fold_create_marker_in_C()
   let content =<< trim [CODE]
     /*
      * comment
-     * 
+     *
      *
      */
     int f(int* p) {
@@ -1503,6 +1503,7 @@ func Test_foldexpr_scriptlocal_func()
   set foldmethod=expr foldexpr=s:FoldFunc()
   redraw!
   call assert_equal(expand('<SID>') .. 'FoldFunc()', &foldexpr)
+  call assert_equal(expand('<SID>') .. 'FoldFunc()', &g:foldexpr)
   call assert_equal(1, g:FoldLnum)
   set foldmethod& foldexpr=
   bw!
@@ -1512,8 +1513,31 @@ func Test_foldexpr_scriptlocal_func()
   set foldmethod=expr foldexpr=<SID>FoldFunc()
   redraw!
   call assert_equal(expand('<SID>') .. 'FoldFunc()', &foldexpr)
+  call assert_equal(expand('<SID>') .. 'FoldFunc()', &g:foldexpr)
   call assert_equal(1, g:FoldLnum)
-  set foldmethod& foldexpr=
+  bw!
+  call setline(1, 'abc')
+  setlocal foldmethod& foldexpr&
+  setglobal foldmethod=expr foldexpr=s:FoldFunc()
+  call assert_equal(expand('<SID>') .. 'FoldFunc()', &g:foldexpr)
+  call assert_equal('0', &foldexpr)
+  enew!
+  call setline(1, 'abc')
+  redraw!
+  call assert_equal(expand('<SID>') .. 'FoldFunc()', &foldexpr)
+  call assert_equal(1, g:FoldLnum)
+  bw!
+  call setline(1, 'abc')
+  setlocal foldmethod& foldexpr&
+  setglobal foldmethod=expr foldexpr=<SID>FoldFunc()
+  call assert_equal(expand('<SID>') .. 'FoldFunc()', &g:foldexpr)
+  call assert_equal('0', &foldexpr)
+  enew!
+  call setline(1, 'abc')
+  redraw!
+  call assert_equal(expand('<SID>') .. 'FoldFunc()', &foldexpr)
+  call assert_equal(1, g:FoldLnum)
+  set foldmethod& foldexpr&
   delfunc s:FoldFunc
   bw!
 endfunc
@@ -1527,26 +1551,111 @@ func Test_foldtext_scriptlocal_func()
   new | only
   call setline(1, range(50))
   let g:FoldTextArgs = []
-  set foldmethod=manual
   set foldtext=s:FoldText()
   norm! 4Gzf4j
   redraw!
   call assert_equal(expand('<SID>') .. 'FoldText()', &foldtext)
+  call assert_equal(expand('<SID>') .. 'FoldText()', &g:foldtext)
   call assert_equal([4, 8], g:FoldTextArgs)
   set foldtext&
   bw!
   new | only
   call setline(1, range(50))
   let g:FoldTextArgs = []
-  set foldmethod=manual
   set foldtext=<SID>FoldText()
   norm! 8Gzf4j
   redraw!
   call assert_equal(expand('<SID>') .. 'FoldText()', &foldtext)
+  call assert_equal(expand('<SID>') .. 'FoldText()', &g:foldtext)
   call assert_equal([8, 12], g:FoldTextArgs)
   set foldtext&
   bw!
+  call setline(1, range(50))
+  let g:FoldTextArgs = []
+  setlocal foldtext&
+  setglobal foldtext=s:FoldText()
+  call assert_equal(expand('<SID>') .. 'FoldText()', &g:foldtext)
+  call assert_equal('foldtext()', &foldtext)
+  enew!
+  call setline(1, range(50))
+  norm! 12Gzf4j
+  redraw!
+  call assert_equal(expand('<SID>') .. 'FoldText()', &foldtext)
+  call assert_equal([12, 16], g:FoldTextArgs)
+  set foldtext&
+  bw!
+  call setline(1, range(50))
+  let g:FoldTextArgs = []
+  setlocal foldtext&
+  setglobal foldtext=<SID>FoldText()
+  call assert_equal(expand('<SID>') .. 'FoldText()', &g:foldtext)
+  call assert_equal('foldtext()', &foldtext)
+  enew!
+  call setline(1, range(50))
+  norm! 16Gzf4j
+  redraw!
+  call assert_equal(expand('<SID>') .. 'FoldText()', &foldtext)
+  call assert_equal([16, 20], g:FoldTextArgs)
+  set foldtext&
+  bw!
   delfunc s:FoldText
+endfunc
+
+" Test for setting 'foldtext' from the modeline and executing the expression
+" in a sandbox
+func Test_foldtext_in_modeline()
+  func ModelineFoldText()
+    call feedkeys('aFoo', 'xt')
+    return "folded text"
+  endfunc
+  let lines =<< trim END
+    func T()
+      let i = 1
+    endfunc
+    " vim: foldenable foldtext=ModelineFoldText()
+  END
+  call writefile(lines, 'Xmodelinefoldtext', 'D')
+
+  set modeline modelineexpr
+  split Xmodelinefoldtext
+
+  call cursor(1, 1)
+  normal! zf3j
+  call assert_equal('folded text', foldtextresult(1))
+  call assert_equal(lines, getbufline('', 1, '$'))
+
+  bw!
+  set modeline& modelineexpr&
+  delfunc ModelineFoldText
+endfunc
+
+" Test for setting 'foldexpr' from the modeline and executing the expression
+" in a sandbox
+func Test_foldexpr_in_modeline()
+  func ModelineFoldExpr()
+    call feedkeys('aFoo', 'xt')
+    return strlen(matchstr(getline(v:lnum),'^\s*'))
+  endfunc
+  let lines =<< trim END
+    aaa
+     bbb
+      ccc
+      ccc
+     bbb
+    aaa
+    " vim: foldenable foldmethod=expr foldexpr=ModelineFoldExpr()
+  END
+  call writefile(lines, 'Xmodelinefoldexpr', 'D')
+
+  set modeline modelineexpr
+  split Xmodelinefoldexpr
+
+  call assert_equal(2, foldlevel(3))
+  call assert_equal(lines, getbufline('', 1, '$'))
+
+  bw!
+  set modeline& modelineexpr&
+  delfunc ModelineFoldExpr
 endfunc
 
 " Make sure a fold containing a nested fold is split correctly when using
@@ -1692,6 +1801,49 @@ func Test_expand_fold_at_bottom_of_buffer()
   fold
   execute "normal A\<CR>"
   call assert_equal([1, 1], range(1, 2)->map('foldlevel(v:val)'))
+
+  bwipe!
+endfunc
+
+func Test_fold_screenrow_motion()
+  call setline(1, repeat(['aaaa'], 5))
+  1,4fold
+  norm Ggkzo
+  call assert_equal(1, line('.'))
+endfunc
+
+" This was using freed memory
+func Test_foldcolumn_linebreak_control_char()
+  CheckFeature linebreak
+
+  5vnew
+  setlocal foldcolumn=1 linebreak
+  call setline(1, "aaa\<C-A>b")
+  redraw
+  call assert_equal([' aaa^', ' Ab  '], ScreenLines([1, 2], 5))
+  call assert_equal(screenattr(1, 5), screenattr(2, 2))
+
+  bwipe!
+endfunc
+
+" This used to cause invalid memory access
+func Test_foldexpr_return_empty_string()
+  new
+  setlocal foldexpr='' foldmethod=expr
+  redraw
+
+  bwipe!
+endfunc
+
+" Make sure that when ending a fold that hasn't been started, it does not
+" start a new fold.
+func Test_foldexpr_end_fold()
+  new
+  setlocal foldmethod=expr
+  let &l:foldexpr = 'v:lnum == 2 ? "<2" : "="'
+  call setline(1, range(1, 3))
+  redraw
+  call assert_equal([0, 0, 0], range(1, 3)->map('foldlevel(v:val)'))
 
   bwipe!
 endfunc

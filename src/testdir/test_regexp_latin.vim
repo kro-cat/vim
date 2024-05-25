@@ -874,12 +874,26 @@ func Regex_Mark()
   %d
 endfunc
 
+" Same test as above, but use verymagic
+func Regex_Mark_Verymagic()
+  call append(0, ['', '', '', 'Marks:', 'asdfSasdfsadfEasdf', 'asdfSas',
+        \ 'dfsadfEasdf', '', '', '', '', ''])
+  call cursor(4, 1)
+  exe "normal jfSmsfEme:.-4,.+6s/\\v.%>'s.*%<'e../here/\<CR>"
+  exe "normal jfSmsj0fEme:.-4,.+6s/\\v.%>'s\\_.*%<'e../again/\<CR>"
+  call assert_equal(['', '', '', 'Marks:', 'asdfhereasdf', 'asdfagainasdf',
+        \ '', '', '', '', '', ''], getline(1, '$'))
+  %d
+endfunc
+
 func Test_matching_marks()
   new
   set regexpengine=1
   call Regex_Mark()
+  call Regex_Mark_Verymagic()
   set regexpengine=2
   call Regex_Mark()
+  call Regex_Mark_Verymagic()
   bwipe!
 endfunc
 
@@ -1149,7 +1163,7 @@ def Test_compare_column_matchstr()
   # matchstr().
   enew
   setline(1, ['one', 'two', 'three'])
-  :3 
+  :3
   :/ee
   bwipe!
   set re=1

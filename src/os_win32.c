@@ -156,7 +156,10 @@ static HANDLE g_hConOut = INVALID_HANDLE_VALUE;
 
 // Win32 Screen buffer,coordinate,console I/O information
 static SMALL_RECT g_srScrollRegion;
-static COORD	  g_coord;  // 0-based, but external coords are 1-based
+// This is explicitly initialised to work around a LTCG issue on Windows ARM64
+// (at least of 19.39.33321).  This pushes this into the `.data` rather than
+// `.bss` which corrects code generation in `write_chars` (#13453).
+static COORD	  g_coord = {0, 0};  // 0-based, but external coords are 1-based
 
 // The attribute of the screen when the editor was started
 static WORD  g_attrDefault = 7;  // lightgray text on black background
@@ -232,7 +235,8 @@ static guicolor_T store_console_bg_rgb;
 static guicolor_T store_console_fg_rgb;
 static int default_console_color_bg = 0x000000; // black
 static int default_console_color_fg = 0xc0c0c0; // white
-#  define USE_VTP		(vtp_working && is_term_win32())
+#  define USE_VTP		(vtp_working && is_term_win32() \
+						 && (p_tgc || t_colors >= 256))
 #  define USE_WT		(wt_working)
 # else
 #  define USE_VTP		0
@@ -253,7 +257,7 @@ static void restore_console_color_rgb(void);
 static int suppress_winsize = 1;	// don't fiddle with console
 #endif
 
-static char_u *exe_path = NULL;
+static WCHAR *exe_pathw = NULL;
 
 static BOOL win8_or_later = FALSE;
 static BOOL win10_22H2_or_later = FALSE;
@@ -461,46 +465,71 @@ wait_for_single_object(
 # endif
 #endif   // !FEAT_GUI_MSWIN || VIMDLL
 
-    static void
-get_exe_name(void)
+    void
+mch_get_exe_name(void)
 {
     // Maximum length of $PATH is more than MAXPATHL.  8191 is often mentioned
-    // as the maximum length that works (plus a NUL byte).
-#define MAX_ENV_PATH_LEN 8192
-    char	temp[MAX_ENV_PATH_LEN];
-    char_u	*p;
+    // as the maximum length that works.  Add 1 for a NUL byte and 5 for
+    // "PATH=".
+#define MAX_ENV_PATH_LEN (8191 + 1 + 5)
+    WCHAR	temp[MAX_ENV_PATH_LEN];
+    WCHAR	buf[MAX_PATH];
+    int		updated = FALSE;
+    static int	enc_prev = -1;
 
-    if (exe_name == NULL)
+    if (exe_name == NULL || exe_pathw == NULL || enc_prev != enc_codepage)
     {
 	// store the name of the executable, may be used for $VIM
-	GetModuleFileName(NULL, temp, MAX_ENV_PATH_LEN - 1);
-	if (*temp != NUL)
-	    exe_name = FullName_save((char_u *)temp, FALSE);
+	GetModuleFileNameW(NULL, buf, MAX_PATH);
+	if (*buf != NUL)
+	{
+	    if (enc_codepage == -1)
+		enc_codepage = GetACP();
+	    vim_free(exe_name);
+	    exe_name = utf16_to_enc(buf, NULL);
+	    enc_prev = enc_codepage;
+
+	    WCHAR *wp = wcsrchr(buf, '\\');
+	    if (wp != NULL)
+		*wp = NUL;
+	    vim_free(exe_pathw);
+	    exe_pathw = _wcsdup(buf);
+	    updated = TRUE;
+	}
     }
 
-    if (exe_path != NULL || exe_name == NULL)
-	return;
-
-    exe_path = vim_strnsave(exe_name, gettail_sep(exe_name) - exe_name);
-    if (exe_path == NULL)
+    if (exe_pathw == NULL || !updated)
 	return;
 
     // Append our starting directory to $PATH, so that when doing
     // "!xxd" it's found in our starting directory.  Needed because
     // SearchPath() also looks there.
-    p = mch_getenv("PATH");
-    if (p == NULL
-	    || STRLEN(p) + STRLEN(exe_path) + 2 < MAX_ENV_PATH_LEN)
+    WCHAR *p = _wgetenv(L"PATH");
+    if (p == NULL || wcslen(p) + wcslen(exe_pathw) + 2 + 5 < MAX_ENV_PATH_LEN)
     {
+	wcscpy(temp, L"PATH=");
+
 	if (p == NULL || *p == NUL)
-	    temp[0] = NUL;
+	    wcscat(temp, exe_pathw);
 	else
 	{
-	    STRCPY(temp, p);
-	    STRCAT(temp, ";");
+	    wcscat(temp, p);
+
+	    // Check if exe_path is already included in $PATH.
+	    if (wcsstr(temp, exe_pathw) == NULL)
+	    {
+		// Append ';' if $PATH doesn't end with it.
+		size_t len = wcslen(temp);
+		if (temp[len - 1] != L';')
+		    wcscat(temp, L";");
+
+		wcscat(temp, exe_pathw);
+	    }
 	}
-	STRCAT(temp, exe_path);
-	vim_setenv((char_u *)"PATH", (char_u *)temp);
+	_wputenv(temp);
+#ifdef libintl_wputenv
+	libintl_wputenv(temp);
+#endif
     }
 }
 
@@ -537,11 +566,12 @@ vimLoadLib(const char *name)
 
     // NOTE: Do not use mch_dirname() and mch_chdir() here, they may call
     // vimLoadLib() recursively, which causes a stack overflow.
-    if (exe_path == NULL)
-	get_exe_name();
-
-    if (exe_path == NULL)
-	return NULL;
+    if (exe_pathw == NULL)
+    {
+	mch_get_exe_name();
+	if (exe_pathw == NULL)
+	    return NULL;
+    }
 
     WCHAR old_dirw[MAXPATHL];
 
@@ -551,7 +581,7 @@ vimLoadLib(const char *name)
     // Change directory to where the executable is, both to make
     // sure we find a .dll there and to avoid looking for a .dll
     // in the current directory.
-    SetCurrentDirectory((LPCSTR)exe_path);
+    SetCurrentDirectoryW(exe_pathw);
     dll = LoadLibrary(name);
     SetCurrentDirectoryW(old_dirw);
     return dll;
@@ -599,15 +629,20 @@ get_imported_func_info(HINSTANCE hInst, const char *funcname, int info,
     PIMAGE_THUNK_DATA		pIAT;	    // Import Address Table
     PIMAGE_THUNK_DATA		pINT;	    // Import Name Table
     PIMAGE_IMPORT_BY_NAME	pImpName;
+    DWORD			ImpVA;
 
     if (pDOS->e_magic != IMAGE_DOS_SIGNATURE)
 	return NULL;
     pPE = (PIMAGE_NT_HEADERS)(pImage + pDOS->e_lfanew);
     if (pPE->Signature != IMAGE_NT_SIGNATURE)
 	return NULL;
-    pImpDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pImage
-	    + pPE->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT]
-							    .VirtualAddress);
+
+    ImpVA = pPE->OptionalHeader
+		.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT].VirtualAddress;
+    if (ImpVA == 0)
+	return NULL;	// No Import Table
+    pImpDesc = (PIMAGE_IMPORT_DESCRIPTOR)(pImage + ImpVA);
+
     for (; pImpDesc->FirstThunk; ++pImpDesc)
     {
 	if (!pImpDesc->OriginalFirstThunk)
@@ -679,6 +714,65 @@ get_dll_import_func(HINSTANCE hInst, const char *funcname)
 hook_dll_import_func(HINSTANCE hInst, const char *funcname, const void *hook)
 {
     return get_imported_func_info(hInst, funcname, 2, hook);
+}
+#endif
+
+#if defined(FEAT_PYTHON3) || defined(PROTO)
+/*
+ * Check if the specified DLL is a function forwarder.
+ * If yes, return the instance of the forwarded DLL.
+ * If no, return the specified DLL.
+ * If error, return NULL.
+ * This assumes that the DLL forwards all the function to a single DLL.
+ */
+    HINSTANCE
+get_forwarded_dll(HINSTANCE hInst)
+{
+    PBYTE			pImage = (PBYTE)hInst;
+    PIMAGE_DOS_HEADER		pDOS = (PIMAGE_DOS_HEADER)hInst;
+    PIMAGE_NT_HEADERS		pPE;
+    PIMAGE_EXPORT_DIRECTORY	pExpDir;
+    DWORD			ExpVA;
+    DWORD			ExpSize;
+    LPDWORD			pFunctionTable;
+
+    if (pDOS->e_magic != IMAGE_DOS_SIGNATURE)
+	return NULL;
+    pPE = (PIMAGE_NT_HEADERS)(pImage + pDOS->e_lfanew);
+    if (pPE->Signature != IMAGE_NT_SIGNATURE)
+	return NULL;
+
+    ExpVA = pPE->OptionalHeader
+		.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+    ExpSize = pPE->OptionalHeader
+		.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+    if (ExpVA == 0)
+	return hInst;	// No Export Directory
+    pExpDir = (PIMAGE_EXPORT_DIRECTORY)(pImage + ExpVA);
+    pFunctionTable = (LPDWORD)(pImage + pExpDir->AddressOfFunctions);
+
+    if (pExpDir->NumberOfNames == 0)
+	return hInst;	// No export names.
+
+    // Check only the first entry.
+    if ((pFunctionTable[0] < ExpVA) || (pFunctionTable[0] >= ExpVA + ExpSize))
+	// The first entry is not a function forwarder.
+	return hInst;
+
+    // The first entry is a function forwarder.
+    // The name is represented as "DllName.FunctionName".
+    const char *name = (const char *)(pImage + pFunctionTable[0]);
+    const char *p = strchr(name, '.');
+    if (p == NULL)
+	return hInst;
+
+    // Extract DllName.
+    char buf[MAX_PATH];
+    if (p - name + 1 > sizeof(buf))
+	return NULL;
+    strncpy(buf, name, p - name);
+    buf[p - name] = '\0';
+    return GetModuleHandleA(buf);
 }
 #endif
 
@@ -1288,9 +1382,9 @@ encode_key_event(dict_T *args, INPUT_RECORD *ir)
 	if (mods)
 	{
 	    // If "modifiers" is explicitly set in the args, then we reset any
-	    // remembered modifer key state that may have been set from earlier
-	    // mod-key-down events, even if they are not yet unset by earlier
-	    // mod-key-up events.
+	    // remembered modifier key state that may have been set from
+	    // earlier mod-key-down events, even if they are not yet unset by
+	    // earlier mod-key-up events.
 	    s_dwMods = 0;
 	    if (mods & MOD_MASK_SHIFT)
 		ker.dwControlKeyState |= SHIFT_PRESSED;
@@ -1997,7 +2091,7 @@ test_mswin_event(char_u *event, dict_T *args)
     }
 
     // Ideally, WriteConsoleInput would be used to inject these low-level
-    // events.  But, this doesnt work well in the CI test environment.  So
+    // events.  But, this doesn't work well in the CI test environment.  So
     // implementing an input_record_buffer instead.
     if (input_encoded)
 	lpEventsWritten = write_input_record_buffer(&ir, 1);
@@ -2693,6 +2787,8 @@ executable_file(char *name, char_u **path)
     if (attrs & FILE_ATTRIBUTE_REPARSE_POINT)
     {
 	char_u	*res = resolve_appexeclink((char_u *)name);
+	if (res == NULL)
+	    res = resolve_reparse_point((char_u *)name);
 	if (res == NULL)
 	    return FALSE;
 	// The path is already absolute.
@@ -3426,7 +3522,6 @@ mch_init_c(void)
 
     wt_init();
     vtp_flag_init();
-    vtp_init();
 # ifdef FEAT_RESTORE_ORIG_SCREEN
     // Save the initial console buffer for later restoration
     SaveConsoleBuffer(&g_cbOrig);
@@ -3462,6 +3557,11 @@ mch_init_c(void)
 	SetConsoleIcon(g_hWnd, g_hVimIcon, g_hVimIcon);
 
     ui_get_shellsize();
+
+    vtp_init();
+    // Switch to a new alternate screen buffer.
+    if (use_alternate_screen_buffer)
+	vtp_printf("\033[?1049h");
 
 # ifdef MCH_WRITE_DUMP
     fdDump = fopen("dump", "wt");
@@ -3581,7 +3681,7 @@ mch_check_win(
     int argc UNUSED,
     char **argv UNUSED)
 {
-    get_exe_name();
+    mch_get_exe_name();
 
 #if defined(FEAT_GUI_MSWIN) && !defined(VIMDLL)
     return OK;	    // GUI always has a tty
@@ -3740,8 +3840,7 @@ mch_dirname(
 	if (STRLEN(p) >= (size_t)len)
 	{
 	    // long path name is too long, fall back to short one
-	    vim_free(p);
-	    p = NULL;
+	    VIM_CLEAR(p);
 	}
     }
     if (p == NULL)
@@ -4436,6 +4535,9 @@ ResizeConBuf(
     HANDLE  hConsole,
     COORD   coordScreen)
 {
+    if (use_alternate_screen_buffer)
+	return;
+
     if (!SetConsoleScreenBufferSize(hConsole, coordScreen))
     {
 # ifdef MCH_WRITE_DUMP
@@ -5053,8 +5155,7 @@ mch_system_piped(char *cmd, int options)
 	    )
 	{
 	    len = 0;
-	    if (!(options & SHELL_EXPAND)
-		&& ((options &
+	    if (((options &
 			(SHELL_READ|SHELL_WRITE|SHELL_COOKED))
 		    != (SHELL_READ|SHELL_WRITE|SHELL_COOKED)
 # ifdef FEAT_GUI
@@ -5074,7 +5175,7 @@ mch_system_piped(char *cmd, int options)
 		{
 		    /*
 		     * For pipes: Check for CTRL-C: send interrupt signal to
-		     * child.  Check for CTRL-D: EOF, close pipe to child.
+		     * child.
 		     */
 		    if (len == 1 && cmd != NULL)
 		    {
@@ -5084,10 +5185,22 @@ mch_system_piped(char *cmd, int options)
 			// now put 9 as SIGKILL
 			    TerminateProcess(pi.hProcess, 9);
 			}
-			if (ta_buf[ta_len] == Ctrl_D)
+		    }
+
+		    /*
+		     * Check for CTRL-D: EOF, close pipe to child.
+		     * Ctrl_D may be decorated by _OnChar()
+		     */
+		    if ((len == 1 || len == 4 ) && cmd != NULL)
+		    {
+			if (ta_buf[0] == Ctrl_D
+			    || (ta_buf[0] == CSI
+				&& ta_buf[1] == KS_MODIFIER
+				&& ta_buf[3] == Ctrl_D))
 			{
 			    CloseHandle(g_hChildStd_IN_Wr);
 			    g_hChildStd_IN_Wr = NULL;
+			    len = 0;
 			}
 		    }
 
@@ -5415,17 +5528,17 @@ mch_call_shell(
      * Catch all deadly signals while running the external command, because a
      * CTRL-C, Ctrl-Break or illegal instruction  might otherwise kill us.
      */
-    signal(SIGINT, SIG_IGN);
+    mch_signal(SIGINT, SIG_IGN);
 #if defined(__GNUC__) && !defined(__MINGW32__)
-    signal(SIGKILL, SIG_IGN);
+    mch_signal(SIGKILL, SIG_IGN);
 #else
-    signal(SIGBREAK, SIG_IGN);
+    mch_signal(SIGBREAK, SIG_IGN);
 #endif
-    signal(SIGILL, SIG_IGN);
-    signal(SIGFPE, SIG_IGN);
-    signal(SIGSEGV, SIG_IGN);
-    signal(SIGTERM, SIG_IGN);
-    signal(SIGABRT, SIG_IGN);
+    mch_signal(SIGILL, SIG_IGN);
+    mch_signal(SIGFPE, SIG_IGN);
+    mch_signal(SIGSEGV, SIG_IGN);
+    mch_signal(SIGTERM, SIG_IGN);
+    mch_signal(SIGABRT, SIG_IGN);
 
     if (options & SHELL_COOKED)
 	settmode(TMODE_COOK);	// set to normal mode
@@ -5654,17 +5767,17 @@ mch_call_shell(
     }
     resettitle();
 
-    signal(SIGINT, SIG_DFL);
+    mch_signal(SIGINT, SIG_DFL);
 #if defined(__GNUC__) && !defined(__MINGW32__)
-    signal(SIGKILL, SIG_DFL);
+    mch_signal(SIGKILL, SIG_DFL);
 #else
-    signal(SIGBREAK, SIG_DFL);
+    mch_signal(SIGBREAK, SIG_DFL);
 #endif
-    signal(SIGILL, SIG_DFL);
-    signal(SIGFPE, SIG_DFL);
-    signal(SIGSEGV, SIG_DFL);
-    signal(SIGTERM, SIG_DFL);
-    signal(SIGABRT, SIG_DFL);
+    mch_signal(SIGILL, SIG_DFL);
+    mch_signal(SIGFPE, SIG_DFL);
+    mch_signal(SIGSEGV, SIG_DFL);
+    mch_signal(SIGTERM, SIG_DFL);
+    mch_signal(SIGABRT, SIG_DFL);
 
     return x;
 }
@@ -5710,7 +5823,7 @@ win32_build_env(dict_T *env, garray_T *gap, int is_terminal)
 
     if (env != NULL)
     {
-	for (hi = env->dv_hashtab.ht_array; todo > 0; ++hi)
+	FOR_ALL_HASHTAB_ITEMS(&env->dv_hashtab, hi, todo)
 	{
 	    if (!HASHITEM_EMPTY(hi))
 	    {
@@ -5724,7 +5837,7 @@ win32_build_env(dict_T *env, garray_T *gap, int is_terminal)
 		    size_t	lkey = wcslen(wkey);
 		    size_t	lval = wcslen(wval);
 
-		    if (ga_grow(gap, (int)(lkey + lval + 2)) != OK)
+		    if (ga_grow(gap, (int)(lkey + lval + 2)) == FAIL)
 			continue;
 		    for (n = 0; n < lkey; n++)
 			*((WCHAR*)gap->ga_data + gap->ga_len++) = wkey[n];
@@ -5753,7 +5866,7 @@ win32_build_env(dict_T *env, garray_T *gap, int is_terminal)
 		*((WCHAR*)gap->ga_data + gap->ga_len++) = *p;
 	    p++;
 	}
-	FreeEnvironmentStrings(base);
+	FreeEnvironmentStringsW(base);
 	*((WCHAR*)gap->ga_data + gap->ga_len++) = L'\0';
     }
 
@@ -6188,12 +6301,6 @@ termcap_mode_start(void)
     if (g_fTermcapMode)
 	return;
 
-    // VTP uses alternate screen buffer.
-    // Switch to a new alternate screen buffer.
-    // But, not if running in a nested terminal
-    if (use_alternate_screen_buffer)
-	vtp_printf("\033[?1049h");
-
     SaveConsoleBuffer(&g_cbNonTermcap);
 
     if (g_cbTermcap.IsValid)
@@ -6272,7 +6379,6 @@ termcap_mode_end(void)
     RestoreConsoleBuffer(cb, p_rs);
     restore_console_color_rgb();
 
-    // VTP uses alternate screen buffer.
     // Switch back to main screen buffer.
     if (exiting && use_alternate_screen_buffer)
 	vtp_printf("\033[?1049l");
@@ -6284,9 +6390,8 @@ termcap_mode_end(void)
 	 */
 	coord.X = 0;
 	coord.Y = (SHORT) (p_rs ? cb->Info.dwCursorPosition.Y : (Rows - 1));
-	if (!vtp_working)
-	    FillConsoleOutputCharacter(g_hConOut, ' ',
-		    cb->Info.dwSize.X, coord, &dwDummy);
+	FillConsoleOutputCharacter(g_hConOut, ' ',
+		cb->Info.dwSize.X, coord, &dwDummy);
 	/*
 	 * The following is just for aesthetics.  If we are exiting without
 	 * restoring the screen, then we want to have a prompt string
@@ -6496,11 +6601,7 @@ insert_lines(unsigned cLines)
     clip.Bottom = g_srScrollRegion.Bottom;
 
     fill.Char.AsciiChar = ' ';
-    if (!(vtp_working
-# ifdef FEAT_TERMGUICOLORS
-		&& (p_tgc || t_colors >= 256)
-# endif
-	 ))
+    if (!USE_VTP)
 	fill.Attributes = g_attrCurrent;
     else
 	fill.Attributes = g_attrDefault;
@@ -6624,11 +6725,7 @@ gotoxy(
     if (x < 1 || x > (unsigned)Columns || y < 1 || y > (unsigned)Rows)
 	return;
 
-    if (!(vtp_working
-# ifdef FEAT_TERMGUICOLORS
-		&& (p_tgc || t_colors >= 256)
-# endif
-	 ))
+    if (!USE_VTP)
     {
 	// There are reports of double-width characters not displayed
 	// correctly.  This workaround should fix it, similar to how it's done
@@ -6775,20 +6872,30 @@ visual_bell(void)
     WORD    attrFlash = ~g_attrCurrent & 0xff;
 
     DWORD   dwDummy;
-    LPWORD  oldattrs = ALLOC_MULT(WORD, Rows * Columns);
+    LPWORD  oldattrs = NULL;
 
-    if (oldattrs == NULL)
-	return;
-    ReadConsoleOutputAttribute(g_hConOut, oldattrs, Rows * Columns,
+# ifdef FEAT_TERMGUICOLORS
+    if (!(p_tgc || t_colors >= 256))
+# endif
+    {
+	oldattrs = ALLOC_MULT(WORD, Rows * Columns);
+	if (oldattrs == NULL)
+	    return;
+	ReadConsoleOutputAttribute(g_hConOut, oldattrs, Rows * Columns,
 			       coordOrigin, &dwDummy);
+    }
+
     FillConsoleOutputAttribute(g_hConOut, attrFlash, Rows * Columns,
 			       coordOrigin, &dwDummy);
 
     Sleep(15);	    // wait for 15 msec
-    if (!vtp_working)
+
+    if (oldattrs != NULL)
+    {
 	WriteConsoleOutputAttribute(g_hConOut, oldattrs, Rows * Columns,
 				coordOrigin, &dwDummy);
-    vim_free(oldattrs);
+	vim_free(oldattrs);
+    }
 }
 
 
@@ -6843,7 +6950,7 @@ write_chars(
 	    vim_free(unicodebuf);
 	    unicodebuf = length ? LALLOC_MULT(WCHAR, length) : NULL;
 	    unibuflen = unibuflen ? 0 : length;
-	} while(1);
+	} while (TRUE);
 	cells = mb_string2cells(pchBuf, cbToWrite);
     }
     else // cbToWrite == 1 && *pchBuf == ' ' && enc_utf8
@@ -6872,11 +6979,7 @@ write_chars(
 	}
     }
 
-    if (!(vtp_working
-# ifdef FEAT_TERMGUICOLORS
-	    && (p_tgc || t_colors >= 256)
-# endif
-	))
+    if (!USE_VTP)
     {
 	FillConsoleOutputAttribute(g_hConOut, g_attrCurrent, cells,
 				    coord, &written);
@@ -6916,11 +7019,7 @@ write_chars(
     }
 
     // Cursor under VTP is always in the correct position, no need to reset.
-    if (!(vtp_working
-# ifdef FEAT_TERMGUICOLORS
-		&& (p_tgc || t_colors >= 256)
-# endif
-	 ))
+    if (!USE_VTP)
 	gotoxy(g_coord.X + 1, g_coord.Y + 1);
 
     return written;
@@ -7216,11 +7315,7 @@ notsgr:
 			normvideo();
 		    else if (argc == 1)
 		    {
-			if (vtp_working
-# ifdef FEAT_TERMGUICOLORS
-				&& (p_tgc || t_colors >= 256)
-# endif
-			   )
+			if (USE_VTP)
 			    textcolor((WORD)arg1);
 			else
 			    textattr((WORD)arg1);
@@ -7359,7 +7454,7 @@ notsgr:
 	{
 	    int l = 2;
 
-	    if (isdigit(s[l]))
+	    if (SAFE_isdigit(s[l]))
 		l++;
 	    if (s[l] == ' ' && s[l + 1] == 'q')
 	    {
@@ -8064,8 +8159,7 @@ copy_extattr(char_u *from, char_u *to)
 	    if (pNtQueryEaFile(h, &iosb, ea, eainfo.EaSize, FALSE,
 			NULL, 0, NULL, TRUE) != STATUS_SUCCESS)
 	    {
-		vim_free(ea);
-		ea = NULL;
+		VIM_CLEAR(ea);
 	    }
 	}
     }
@@ -8429,6 +8523,11 @@ vtp_flag_init(void)
 	mode |= (ENABLE_PROCESSED_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 	if (SetConsoleMode(out, mode) == 0)
 	    vtp_working = 0;
+
+	// VTP uses alternate screen buffer.
+	// But, not if running in a nested terminal
+	use_alternate_screen_buffer = win10_22H2_or_later && p_rs && vtp_working
+						&& !mch_getenv("VIM_TERMINAL");
     }
 #endif
 
@@ -8456,29 +8555,24 @@ vtp_flag_init(void)
 vtp_init(void)
 {
 # ifdef FEAT_TERMGUICOLORS
-    if (!vtp_working)
-    {
-	CONSOLE_SCREEN_BUFFER_INFOEX csbi;
-	csbi.cbSize = sizeof(csbi);
-	GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
-	save_console_bg_rgb = (guicolor_T)csbi.ColorTable[g_color_index_bg];
-	save_console_fg_rgb = (guicolor_T)csbi.ColorTable[g_color_index_fg];
-	store_console_bg_rgb = save_console_bg_rgb;
-	store_console_fg_rgb = save_console_fg_rgb;
+    CONSOLE_SCREEN_BUFFER_INFOEX csbi;
+    csbi.cbSize = sizeof(csbi);
+    GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    save_console_bg_rgb = (guicolor_T)csbi.ColorTable[g_color_index_bg];
+    save_console_fg_rgb = (guicolor_T)csbi.ColorTable[g_color_index_fg];
+    store_console_bg_rgb = save_console_bg_rgb;
+    store_console_fg_rgb = save_console_fg_rgb;
 
-	COLORREF bg;
-	bg = (COLORREF)csbi.ColorTable[g_color_index_bg];
-	bg = (GetRValue(bg) << 16) | (GetGValue(bg) << 8) | GetBValue(bg);
-	default_console_color_bg = bg;
+    COLORREF bg;
+    bg = (COLORREF)csbi.ColorTable[g_color_index_bg];
+    bg = (GetRValue(bg) << 16) | (GetGValue(bg) << 8) | GetBValue(bg);
+    default_console_color_bg = bg;
 
-	COLORREF fg;
-	fg = (COLORREF)csbi.ColorTable[g_color_index_fg];
-	fg = (GetRValue(fg) << 16) | (GetGValue(fg) << 8) | GetBValue(fg);
-	default_console_color_fg = fg;
-    }
+    COLORREF fg;
+    fg = (COLORREF)csbi.ColorTable[g_color_index_fg];
+    fg = (GetRValue(fg) << 16) | (GetGValue(fg) << 8) | GetBValue(fg);
+    default_console_color_fg = fg;
 # endif
-    use_alternate_screen_buffer = win10_22H2_or_later && p_rs && vtp_working
-						&& !mch_getenv("VIM_TERMINAL");
     set_console_color_rgb();
 }
 
@@ -8497,6 +8591,9 @@ vtp_printf(
     va_list list;
     DWORD   result;
     int	    len;
+
+    if (silent_mode)
+	return 0;
 
     va_start(list, format);
     len = vim_vsnprintf((char *)buf, 100, (char *)format, list);
@@ -8699,23 +8796,23 @@ set_console_color_rgb(void)
 	return;
     }
 
-    if (!conpty_working)
-    {
-	fg = (GetRValue(fg) << 16) | (GetGValue(fg) << 8) | GetBValue(fg);
-	bg = (GetRValue(bg) << 16) | (GetGValue(bg) << 8) | GetBValue(bg);
+    if (use_alternate_screen_buffer)
+	return;
 
-	csbi.cbSize = sizeof(csbi);
-	GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+    fg = (GetRValue(fg) << 16) | (GetGValue(fg) << 8) | GetBValue(fg);
+    bg = (GetRValue(bg) << 16) | (GetGValue(bg) << 8) | GetBValue(bg);
 
-	csbi.cbSize = sizeof(csbi);
-	csbi.srWindow.Right += 1;
-	csbi.srWindow.Bottom += 1;
-	store_console_bg_rgb = csbi.ColorTable[g_color_index_bg];
-	store_console_fg_rgb = csbi.ColorTable[g_color_index_fg];
-	csbi.ColorTable[g_color_index_bg] = (COLORREF)bg;
-	csbi.ColorTable[g_color_index_fg] = (COLORREF)fg;
-	SetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
-    }
+    csbi.cbSize = sizeof(csbi);
+    GetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
+
+    csbi.cbSize = sizeof(csbi);
+    csbi.srWindow.Right += 1;
+    csbi.srWindow.Bottom += 1;
+    store_console_bg_rgb = csbi.ColorTable[g_color_index_bg];
+    store_console_fg_rgb = csbi.ColorTable[g_color_index_fg];
+    csbi.ColorTable[g_color_index_bg] = (COLORREF)bg;
+    csbi.ColorTable[g_color_index_fg] = (COLORREF)fg;
+    SetConsoleScreenBufferInfoEx(g_hConOut, &csbi);
 # endif
 }
 
@@ -8742,39 +8839,24 @@ get_default_console_color(
 	ctermfg = -1;
 	if (id > 0)
 	    syn_id2cterm_bg(id, &ctermfg, &dummynull);
-	if (vtp_working)
-	{
-	    cterm_normal_fg_gui_color = guifg =
-			    ctermfg != -1 ? ctermtoxterm(ctermfg) : INVALCOLOR;
-	    ctermfg = ctermfg < 0 ? 0 : ctermfg;
-	}
+	if (ctermfg != -1)
+	    guifg = ctermtoxterm(ctermfg);
 	else
-	{
-	    guifg = ctermfg != -1 ? ctermtoxterm(ctermfg)
-						    : default_console_color_fg;
-	    cterm_normal_fg_gui_color = guifg;
-	    ctermfg = ctermfg < 0 ? 0 : ctermfg;
-	}
+	    guifg = USE_WT ? INVALCOLOR : default_console_color_fg;
+	cterm_normal_fg_gui_color = guifg;
+	ctermfg = ctermfg < 0 ? 0 : ctermfg;
     }
     if (guibg == INVALCOLOR)
     {
 	ctermbg = -1;
 	if (id > 0)
 	    syn_id2cterm_bg(id, &dummynull, &ctermbg);
-	if (vtp_working)
-	{
-	    cterm_normal_bg_gui_color = guibg =
-			    ctermbg != -1 ? ctermtoxterm(ctermbg) : INVALCOLOR;
-	    if (ctermbg < 0)
-		ctermbg = 0;
-	}
+	if (ctermbg != -1)
+	    guibg = ctermtoxterm(ctermbg);
 	else
-	{
-	    guibg = ctermbg != -1 ? ctermtoxterm(ctermbg)
-						    : default_console_color_bg;
-	    cterm_normal_bg_gui_color = guibg;
-	    ctermbg = ctermbg < 0 ? 0 : ctermbg;
-	}
+	    guibg = USE_WT ? INVALCOLOR : default_console_color_bg;
+	cterm_normal_bg_gui_color = guibg;
+	ctermbg = ctermbg < 0 ? 0 : ctermbg;
     }
 
     *cterm_fg = ctermfg;
@@ -8791,8 +8873,7 @@ get_default_console_color(
 reset_console_color_rgb(void)
 {
 # ifdef FEAT_TERMGUICOLORS
-
-    if (vtp_working)
+    if (use_alternate_screen_buffer)
 	return;
 
     CONSOLE_SCREEN_BUFFER_INFOEX csbi;
@@ -8816,7 +8897,7 @@ reset_console_color_rgb(void)
 restore_console_color_rgb(void)
 {
 # ifdef FEAT_TERMGUICOLORS
-    if (vtp_working)
+    if (use_alternate_screen_buffer)
 	return;
 
     CONSOLE_SCREEN_BUFFER_INFOEX csbi;
@@ -8890,6 +8971,9 @@ get_conpty_fix_type(void)
     void
 resize_console_buf(void)
 {
+    if (use_alternate_screen_buffer)
+	return;
+
     CONSOLE_SCREEN_BUFFER_INFO csbi;
     COORD coord;
     SMALL_RECT newsize;

@@ -36,7 +36,7 @@
 #  error configure did not run properly.  Check auto/config.log.
 # endif
 
-# if (defined(__linux__) && !defined(__ANDROID__)) || defined(__CYGWIN__)
+# if (defined(__linux__) && !defined(__ANDROID__)) || defined(__CYGWIN__) || defined(__GNU__)
 // Needed for strptime().  Needs to be done early, since header files can
 // include other header files and end up including time.h, where these symbols
 // matter for Vim.
@@ -100,6 +100,11 @@
 # endif
 #else
 # define ROOT_UID 0
+#endif
+
+/* Include MAC_OS_X_VERSION_* macros */
+#ifdef HAVE_AVAILABILITYMACROS_H
+# include <AvailabilityMacros.h>
 #endif
 
 /*
@@ -167,7 +172,9 @@
 # if defined(FEAT_NORMAL) && !defined(FEAT_CLIPBOARD)
 #  define FEAT_CLIPBOARD
 # endif
-# if defined(FEAT_HUGE) && !defined(FEAT_SOUND)
+# if defined(FEAT_HUGE) && !defined(FEAT_SOUND) && \
+	defined(__clang_major__) && __clang_major__ >= 7 && \
+	defined(MAC_OS_X_VERSION_MIN_REQUIRED) && MAC_OS_X_VERSION_MIN_REQUIRED >= 1060
 #  define FEAT_SOUND
 # endif
 # if defined(FEAT_SOUND)
@@ -242,6 +249,9 @@
 #if (defined(UNIX) || defined(VMS)) \
 	&& (!defined(MACOS_X) || defined(HAVE_CONFIG_H))
 # include "os_unix.h"	    // bring lots of system header files
+#else
+  // For all non-Unix systems: use old-fashioned signal().
+# define mch_signal(signum, sighandler) signal(signum, sighandler)
 #endif
 
 // Mark unused function arguments with UNUSED, so that gcc -Wunused-parameter
@@ -425,6 +435,17 @@ typedef unsigned short sattr_T;
  */
 typedef unsigned int u8char_T;	// int is 32 bits or more
 
+/*
+ * The vimlong_T has sizeof(vimlong_T) >= 2 * sizeof(int).
+ * One use is simple handling of overflow in int calculations.
+ */
+#if defined(VMS) && defined(VAX)
+// unsupported compiler
+typedef long      vimlong_T;
+#else
+typedef long long vimlong_T;
+#endif
+
 #ifndef UNIX		    // For Unix this is included in os_unix.h
 # include <stdio.h>
 # include <ctype.h>
@@ -483,6 +504,10 @@ typedef unsigned int u8char_T;	// int is 32 bits or more
 # include <wctype.h>
 #endif
 #include <stdarg.h>
+// older compilers do not define va_copy
+#ifndef va_copy
+# define va_copy(dst, src)	((dst) = (src))
+#endif
 
 // for offsetof()
 #include <stddef.h>
@@ -602,6 +627,7 @@ extern int (*dyn_libintl_wputenv)(const wchar_t *envstring);
 // flags for screen_line()
 #define SLF_RIGHTLEFT	1
 #define SLF_POPUP	2
+#define SLF_INC_VCOL	4
 
 #define MB_FILLER_CHAR '<'  // character used when a double-width character
 			    // doesn't fit.
@@ -630,8 +656,8 @@ extern int (*dyn_libintl_wputenv)(const wchar_t *envstring);
 #define VALID_VIRTCOL	0x04	// w_virtcol (file col) is valid
 #define VALID_CHEIGHT	0x08	// w_cline_height and w_cline_folded valid
 #define VALID_CROW	0x10	// w_cline_row is valid
-#define VALID_BOTLINE	0x20	// w_botine and w_empty_rows are valid
-#define VALID_BOTLINE_AP 0x40	// w_botine is approximated
+#define VALID_BOTLINE	0x20	// w_botline and w_empty_rows are valid
+#define VALID_BOTLINE_AP 0x40	// w_botline is approximated
 #define VALID_TOPLINE	0x80	// w_topline is valid (for cursor position)
 
 // Values for w_popup_flags.
@@ -811,6 +837,12 @@ extern int (*dyn_libintl_wputenv)(const wchar_t *envstring);
 #define EXPAND_DISASSEMBLE	50
 #define EXPAND_BREAKPOINT	51
 #define EXPAND_SCRIPTNAMES	52
+#define EXPAND_RUNTIME		53
+#define EXPAND_STRING_SETTING	54
+#define EXPAND_SETTING_SUBTRACT	55
+#define EXPAND_ARGOPT		56
+#define EXPAND_TERMINALOPT	57
+#define EXPAND_KEYMAP		58
 
 // Values for exmode_active (0 is no exmode)
 #define EXMODE_NORMAL		1
@@ -1224,6 +1256,7 @@ extern int (*dyn_libintl_wputenv)(const wchar_t *envstring);
 #define WSP_BELOW	0x40	// put new window below/right
 #define WSP_ABOVE	0x80	// put new window above/left
 #define WSP_NEWLOC	0x100	// don't copy location list
+#define WSP_FORCE_ROOM	0x200	// ignore "not enough room" errors
 
 /*
  * arguments for gui_set_shellsize()
@@ -1371,6 +1404,7 @@ enum auto_event
     EVENT_SAFESTATE,		// going to wait for a character
     EVENT_SAFESTATEAGAIN,	// still waiting for a character
     EVENT_SESSIONLOADPOST,	// after loading a session file
+    EVENT_SESSIONWRITEPOST,	// after writing a session file
     EVENT_SHELLCMDPOST,		// after ":!cmd"
     EVENT_SHELLFILTERPOST,	// after ":1,2!cmd", ":w !cmd", ":r !cmd".
     EVENT_SIGUSR1,		// after the SIGUSR1 signal
@@ -1391,6 +1425,7 @@ enum auto_event
     EVENT_TERMINALWINOPEN,	// after a terminal buffer was created and
 				// entering its window
     EVENT_TERMRESPONSE,		// after setting "v:termresponse"
+    EVENT_TERMRESPONSEALL,	// after setting terminal response vars
     EVENT_TEXTCHANGED,		// text was modified not in Insert mode
     EVENT_TEXTCHANGEDI,		// text was modified in Insert mode
     EVENT_TEXTCHANGEDP,		// TextChangedI with popup menu visible
@@ -1403,7 +1438,8 @@ enum auto_event
     EVENT_VIMRESIZED,		// after Vim window was resized
     EVENT_WINENTER,		// after entering a window
     EVENT_WINLEAVE,		// before leaving a window
-    EVENT_WINNEW,		// when entering a new window
+    EVENT_WINNEWPRE,		// before creating a new window
+    EVENT_WINNEW,		// after creating a new window
     EVENT_WINCLOSED,		// after closing a window
     EVENT_VIMSUSPEND,		// before Vim is suspended
     EVENT_VIMRESUME,		// after Vim is resumed
@@ -1417,8 +1453,8 @@ typedef enum auto_event event_T;
 
 /*
  * Values for index in highlight_attr[].
- * When making changes, also update HL_FLAGS below!  And update the default
- * value of 'highlight' in option.c.
+ * When making changes, also update HL_FLAGS below!
+ * And update the default value of 'highlight': HIGHLIGHT_INIT in optiondefs.h
  */
 typedef enum
 {
@@ -1464,6 +1500,10 @@ typedef enum
     , HLF_SPL	    // SpellLocal
     , HLF_PNI	    // popup menu normal item
     , HLF_PSI	    // popup menu selected item
+    , HLF_PNK	    // popup menu normal item "kind"
+    , HLF_PSK	    // popup menu selected item "kind"
+    , HLF_PNX	    // popup menu normal item "menu" (extra text)
+    , HLF_PSX	    // popup menu selected item "menu" (extra text)
     , HLF_PSB	    // popup menu scrollbar
     , HLF_PST	    // popup menu scrollbar thumb
     , HLF_TP	    // tabpage line
@@ -1475,6 +1515,7 @@ typedef enum
     , HLF_QFL	    // quickfix window line currently selected
     , HLF_ST	    // status lines of terminal windows
     , HLF_STNC	    // status lines of not-current terminal windows
+    , HLF_MSG	    // message area
     , HLF_COUNT	    // MUST be the last one
 } hlf_T;
 
@@ -1484,9 +1525,19 @@ typedef enum
 		  'n', 'a', 'b', 'N', 'G', 'O', 'r', 's', 'S', 'c', 't', 'v', 'V', \
 		  'w', 'W', 'f', 'F', 'A', 'C', 'D', 'T', '-', '>', \
 		  'B', 'P', 'R', 'L', \
-		  '+', '=', 'x', 'X', '*', '#', '_', '!', '.', 'o', 'q', \
-		  'z', 'Z'}
+		  '+', '=', '[', ']', '{', '}', 'x', 'X', \
+		  '*', '#', '_', '!', '.', 'o', 'q', \
+		  'z', 'Z', 'g'}
 
+/*
+ * Values for behaviour in spell_move_to
+ */
+typedef enum
+{
+    SMT_ALL = 0		    // Move to "all" words
+    , SMT_BAD		    // Move to "bad" words only
+    , SMT_RARE		    // Move to "rare" words only
+} smt_T;
 /*
  * Boolean constants
  */
@@ -1863,8 +1914,28 @@ typedef void	    *vim_acl_T;		// dummy to pass an ACL to a function
 #if (defined(FEAT_PROFILE) || defined(FEAT_RELTIME)) && !defined(PROTO)
 # ifdef MSWIN
 typedef LARGE_INTEGER proftime_T;
+#  define PROF_TIME_BLANK "           "
+#  define PROF_TOTALS_HEADER "count  total (s)   self (s)"
 # else
+   // Use tv_fsec for fraction of second (micro or nano) of proftime_T
+#  if defined(HAVE_TIMER_CREATE) && defined(HAVE_CLOCK_GETTIME)
+#   define PROF_NSEC 1
+typedef struct timespec proftime_T;
+#   define PROF_GET_TIME(tm) clock_gettime(CLOCK_MONOTONIC, tm)
+#   define tv_fsec tv_nsec
+#   define TV_FSEC_SEC 1000000000L
+#   define PROF_TIME_FORMAT "%3ld.%09ld"
+#   define PROF_TIME_BLANK "              "
+#   define PROF_TOTALS_HEADER "count     total (s)      self (s)"
+#  else
 typedef struct timeval proftime_T;
+#   define PROF_GET_TIME(tm) gettimeofday(tm, NULL)
+#   define tv_fsec tv_usec
+#   define TV_FSEC_SEC 1000000
+#   define PROF_TIME_FORMAT "%3ld.%06ld"
+#   define PROF_TIME_BLANK "           "
+#   define PROF_TOTALS_HEADER "count  total (s)   self (s)"
+#  endif
 # endif
 #else
 typedef int proftime_T;	    // dummy for function prototypes
@@ -2101,7 +2172,11 @@ typedef int sock_T;
 #define VV_SIZEOFLONG	103
 #define VV_SIZEOFPOINTER 104
 #define VV_MAXCOL	105
-#define VV_LEN		106	// number of v: vars
+#define VV_PYTHON3_VERSION 106
+#define VV_TYPE_TYPEALIAS 107
+#define VV_TYPE_ENUM	  108
+#define VV_TYPE_ENUMVALUE 109
+#define VV_LEN		110	// number of v: vars
 
 // used for v_number in VAR_BOOL and VAR_SPECIAL
 #define VVAL_FALSE	0L	// VAR_BOOL
@@ -2124,6 +2199,9 @@ typedef int sock_T;
 #define VAR_TYPE_INSTR	    11
 #define VAR_TYPE_CLASS	    12
 #define VAR_TYPE_OBJECT	    13
+#define VAR_TYPE_TYPEALIAS  14
+#define VAR_TYPE_ENUM	    15
+#define VAR_TYPE_ENUMVALUE  16
 
 #define DICT_MAXNEST 100	// maximum nesting of lists and dicts
 
@@ -2228,6 +2306,7 @@ typedef enum {
     ASSERT_NOTEQUAL,
     ASSERT_MATCH,
     ASSERT_NOTMATCH,
+    ASSERT_FAILS,
     ASSERT_OTHER
 } assert_type_T;
 
@@ -2269,6 +2348,43 @@ typedef enum {
     KEYPROTOCOL_FAIL
 } keyprot_T;
 
+// errors for when calling a function
+typedef enum {
+    FCERR_NONE,		// no error
+    FCERR_UNKNOWN,	// unknown function
+    FCERR_TOOMANY,	// too many arguments
+    FCERR_TOOFEW,	// too few arguments
+    FCERR_SCRIPT,	// missing script context
+    FCERR_DICT,		// missing dict
+    FCERR_OTHER,	// another kind of error
+    FCERR_DELETED,	// function was deleted
+    FCERR_NOTMETHOD,	// function cannot be used as a method
+    FCERR_FAILED,	// error while executing the function
+} funcerror_T;
+
+/*
+ * Type for the callback function that is invoked after an option value is
+ * changed to validate and apply the new value.
+ *
+ * Returns NULL if the option value is valid is successfully applied.
+ * Otherwise returns an error message.
+ */
+typedef char *(*opt_did_set_cb_T)(optset_T *args);
+
+/*
+ * Type for the callback function that is invoked when expanding possible
+ * string option values during cmdline completion.
+ *
+ * Strings in returned matches will be managed and freed by caller.
+ *
+ * Returns OK if the expansion succeeded (numMatches and matches have to be
+ * set). Otherwise returns FAIL.
+ *
+ * Note: If returned FAIL or *numMatches is 0, *matches will NOT be freed by
+ * caller.
+ */
+typedef int (*opt_expand_cb_T)(optexpand_T *args, int *numMatches, char_u ***matches);
+
 // Flags for assignment functions.
 #define ASSIGN_VAR	0     // ":var" (nothing special)
 #define ASSIGN_FINAL	0x01  // ":final"
@@ -2280,6 +2396,7 @@ typedef enum {
 #define ASSIGN_FOR_LOOP 0x40 // assigning to loop variable
 #define ASSIGN_INIT	0x80 // not assigning a value, just a declaration
 #define ASSIGN_UPDATE_BLOCK_ID 0x100  // update sav_block_id
+#define ASSIGN_COMPOUND_OP 0x200  // compound operator e.g. "+="
 
 #include "ex_cmds.h"	    // Ex command defines
 #include "spell.h"	    // spell checking stuff
@@ -2497,24 +2614,34 @@ typedef enum {
 #  define gtk_widget_set_window(wid, win) \
     do { (wid)->window = (win); } while (0)
 #  define gtk_widget_set_can_default(wid, can) \
-    do { if (can) { GTK_WIDGET_SET_FLAGS(wid, GTK_CAN_DEFAULT); } \
-	else { GTK_WIDGET_UNSET_FLAGS(wid, GTK_CAN_DEFAULT); } } while (0)
+    do { if (can) \
+	    { GTK_WIDGET_SET_FLAGS(wid, GTK_CAN_DEFAULT); } \
+	else \
+	    { GTK_WIDGET_UNSET_FLAGS(wid, GTK_CAN_DEFAULT); } } while (0)
 #  define gtk_widget_set_can_focus(wid, can) \
-    do { if (can) { GTK_WIDGET_SET_FLAGS(wid, GTK_CAN_FOCUS); } \
-	else { GTK_WIDGET_UNSET_FLAGS(wid, GTK_CAN_FOCUS); } } while (0)
+    do { if (can) \
+	    { GTK_WIDGET_SET_FLAGS(wid, GTK_CAN_FOCUS); } \
+	else \
+	    { GTK_WIDGET_UNSET_FLAGS(wid, GTK_CAN_FOCUS); } } while (0)
 #  define gtk_widget_set_visible(wid, vis) \
-    do { if (vis) { gtk_widget_show(wid); } \
-	else { gtk_widget_hide(wid); } } while (0)
+    do { if (vis) \
+	    { gtk_widget_show(wid); } \
+	else \
+	    { gtk_widget_hide(wid); } } while (0)
 # endif
 # if !GTK_CHECK_VERSION(2,20,0)
 #  define gtk_widget_get_mapped(wid)	GTK_WIDGET_MAPPED(wid)
 #  define gtk_widget_get_realized(wid)	GTK_WIDGET_REALIZED(wid)
 #  define gtk_widget_set_mapped(wid, map) \
-    do { if (map) { GTK_WIDGET_SET_FLAGS(wid, GTK_MAPPED); } \
-	else { GTK_WIDGET_UNSET_FLAGS(wid, GTK_MAPPED); } } while (0)
+    do { if (map) \
+	    { GTK_WIDGET_SET_FLAGS(wid, GTK_MAPPED); } \
+	else \
+	    { GTK_WIDGET_UNSET_FLAGS(wid, GTK_MAPPED); } } while (0)
 #  define gtk_widget_set_realized(wid, rea) \
-    do { if (rea) { GTK_WIDGET_SET_FLAGS(wid, GTK_REALIZED); } \
-	else { GTK_WIDGET_UNSET_FLAGS(wid, GTK_REALIZED); } } while (0)
+    do { if (rea) \
+	    { GTK_WIDGET_SET_FLAGS(wid, GTK_REALIZED); } \
+	else \
+	    { GTK_WIDGET_UNSET_FLAGS(wid, GTK_REALIZED); } } while (0)
 # endif
 #endif
 
@@ -2688,20 +2815,11 @@ typedef enum {
 #define GLV_NO_DECL	TFN_NO_DECL	// assignment without :var or :let
 #define GLV_COMPILING	TFN_COMPILING	// variable may be defined later
 #define GLV_ASSIGN_WITH_OP TFN_ASSIGN_WITH_OP // assignment with operator
+#define GLV_PREFER_FUNC	0x10000		// prefer function above variable
+#define GLV_FOR_LOOP	0x20000		// assigning to a loop variable
 
 #define DO_NOT_FREE_CNT 99999	// refcount for dict or list that should not
 				// be freed.
-
-// errors for when calling a function
-#define FCERR_UNKNOWN	0
-#define FCERR_TOOMANY	1
-#define FCERR_TOOFEW	2
-#define FCERR_SCRIPT	3
-#define FCERR_DICT	4
-#define FCERR_NONE	5
-#define FCERR_OTHER	6
-#define FCERR_DELETED	7
-#define FCERR_NOTMETHOD	8   // function cannot be used as a method
 
 // fixed buffer length for fname_trans_sid()
 #define FLEN_FIXED 40
@@ -2860,5 +2978,6 @@ long elapsed(DWORD start_tick);
 // Flags used by "class_flags" of define_function()
 #define CF_CLASS	1	// inside a class
 #define CF_INTERFACE	2	// inside an interface
+#define CF_ABSTRACT_METHOD	4	// inside an abstract class
 
 #endif // VIM__H

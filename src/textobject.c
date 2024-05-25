@@ -226,13 +226,13 @@ findpar(
     if (both && *ml_get(curr) == '}')	// include line with '}'
 	++curr;
     curwin->w_cursor.lnum = curr;
-    if (curr == curbuf->b_ml.ml_line_count && what != '}')
+    if (curr == curbuf->b_ml.ml_line_count && what != '}' && dir == FORWARD)
     {
 	char_u *line = ml_get(curr);
 
 	// Put the cursor on the last character in the last line and make the
 	// motion inclusive.
-	if ((curwin->w_cursor.col = (colnr_T)STRLEN(line)) != 0)
+	if ((curwin->w_cursor.col = ml_get_len(curr)) != 0)
 	{
 	    --curwin->w_cursor.col;
 	    curwin->w_cursor.col -=
@@ -472,6 +472,7 @@ bck_word(long count, int bigword, int stop)
 finished:
 	stop = FALSE;
     }
+    adjust_skipcol();
     return OK;
 }
 
@@ -598,6 +599,7 @@ bckend_word(
 		return OK;
 	}
     }
+    adjust_skipcol();
     return OK;
 }
 
@@ -1127,6 +1129,16 @@ current_block(
 	    sol = TRUE;
 	    if (decl(&curwin->w_cursor) != 0)
 		break;
+	}
+
+	/*
+	 * In Visual mode, when resulting area is empty
+	 * i.e. there is no inner block to select, abort.
+	 */
+	if (EQUAL_POS(start_pos, *end_pos) && VIsual_active)
+	{
+	    curwin->w_cursor = old_pos;
+	    return FAIL;
 	}
 
 	/*

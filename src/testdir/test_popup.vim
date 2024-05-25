@@ -16,7 +16,7 @@ func ListMonths()
   if !empty(entered)
     let mth = filter(mth, 'v:val=~"^".entered')
   endif
-  call complete(1, mth) 
+  call complete(1, mth)
   return ''
 endfunc
 
@@ -74,7 +74,7 @@ func Test_popup_complete()
   call feedkeys("aJu\<f5>\<c-p>l\<c-y>", 'tx')
   call assert_equal(["Jul"], getline(1,2))
   %d
-  
+
   " any-non printable, non-white character: Add this character and
   " reduce number of matches
   call feedkeys("aJu\<f5>\<c-p>l\<c-n>\<c-y>", 'tx')
@@ -96,7 +96,7 @@ func Test_popup_complete()
   call feedkeys("aJ\<f5>".repeat("\<c-n>",3)."\<c-l>\<esc>", 'tx')
   call assert_equal(["J"], getline(1,2))
   %d
-  
+
   " <c-l> - Insert one character from the current match
   call feedkeys("aJ\<f5>".repeat("\<c-n>",4)."\<c-l>\<esc>", 'tx')
   call assert_equal(["January"], getline(1,2))
@@ -856,7 +856,7 @@ func Test_popup_position()
   call term_sendkeys(buf, "jI123456789_\<Esc>")
   call term_sendkeys(buf, "GA\<C-N>")
   call VerifyScreenDump(buf, 'Test_popup_position_04', {'rows': 10})
-  
+
   call term_sendkeys(buf, "\<Esc>u")
   call StopVimInTerminal(buf)
 endfunc
@@ -910,13 +910,22 @@ func Test_popup_command_dump()
 
   " Set a timer to change a menu entry while it's displayed.  The text should
   " not change but the command does.  Making the screendump also verifies that
-  " "changed" shows up, which means the timer triggered
+  " "changed" shows up, which means the timer triggered.
   call term_sendkeys(buf, "/X\<CR>:call StartTimer() | popup PopUp\<CR>")
   call VerifyScreenDump(buf, 'Test_popup_command_04', {})
 
   " Select the Paste entry, executes the changed menu item.
   call term_sendkeys(buf, "jj\<CR>")
   call VerifyScreenDump(buf, 'Test_popup_command_05', {})
+
+  call term_sendkeys(buf, "\<Esc>")
+
+  " Add a window toolbar to the window and check the :popup menu position.
+  call term_sendkeys(buf, ":nnoremenu WinBar.TEST :\<CR>")
+  call term_sendkeys(buf, "/X\<CR>:popup PopUp\<CR>")
+  call VerifyScreenDump(buf, 'Test_popup_command_06', {})
+
+  call term_sendkeys(buf, "\<Esc>")
 
   call StopVimInTerminal(buf)
 endfunc
@@ -1130,6 +1139,10 @@ func Test_CompleteChanged()
     let g:event = copy(v:event)
     let g:item = get(v:event, 'completed_item', {})
     let g:word = get(g:item, 'word', v:null)
+    let l:line = getline('.')
+    if g:word == v:null && l:line == "bc"
+      let g:word = l:line
+    endif
   endfunction
   augroup AAAAA_Group
     au!
@@ -1149,10 +1162,24 @@ func Test_CompleteChanged()
   call assert_equal(v:null, g:word)
   call feedkeys("a\<C-N>\<C-N>\<C-N>\<C-N>\<C-P>", 'tx')
   call assert_equal('foobar', g:word)
+  call feedkeys("S\<C-N>bc", 'tx')
+  call assert_equal("bc", g:word)
+
+  func Omni_test(findstart, base)
+    if a:findstart
+      return col(".")
+    endif
+    return [#{word: "one"}, #{word: "two"}, #{word: "five"}]
+  endfunc
+  set omnifunc=Omni_test
+  set completeopt=menu,menuone
+  call feedkeys("i\<C-X>\<C-O>\<BS>\<BS>\<BS>f", 'tx')
+  call assert_equal('five', g:word)
 
   autocmd! AAAAA_Group
   set complete& completeopt&
   delfunc! OnPumChange
+  delfunc! Omni_test
   bw!
 endfunc
 
@@ -1247,6 +1274,68 @@ func Test_pum_scrollbar()
     call VerifyScreenDump(buf, 'Test_pum_scrollbar_02', {'rows': 7})
   endif
 
+  call StopVimInTerminal(buf)
+endfunc
+
+" Test default highlight groups for popup menu
+func Test_pum_highlights_default()
+  CheckScreendump
+  let lines =<< trim END
+    func CompleteFunc( findstart, base )
+      if a:findstart
+        return 0
+      endif
+      return {
+            \ 'words': [
+            \ { 'word': 'aword1', 'menu': 'extra text 1', 'kind': 'W', },
+            \ { 'word': 'aword2', 'menu': 'extra text 2', 'kind': 'W', },
+            \ { 'word': 'aword3', 'menu': 'extra text 3', 'kind': 'W', },
+            \]}
+    endfunc
+    set completeopt=menu
+    set completefunc=CompleteFunc
+  END
+  call writefile(lines, 'Xscript', 'D')
+  let buf = RunVimInTerminal('-S Xscript', {})
+  call TermWait(buf)
+  call term_sendkeys(buf, "iaw\<C-X>\<C-u>")
+  call TermWait(buf, 50)
+  call VerifyScreenDump(buf, 'Test_pum_highlights_01', {})
+  call term_sendkeys(buf, "\<C-E>\<Esc>u")
+  call TermWait(buf)
+  call StopVimInTerminal(buf)
+endfunc
+
+" Test custom highlight groups for popup menu
+func Test_pum_highlights_custom()
+  CheckScreendump
+  let lines =<< trim END
+    func CompleteFunc( findstart, base )
+      if a:findstart
+        return 0
+      endif
+      return {
+            \ 'words': [
+            \ { 'word': 'aword1', 'menu': 'extra text 1', 'kind': 'W', },
+            \ { 'word': 'aword2', 'menu': 'extra text 2', 'kind': 'W', },
+            \ { 'word': 'aword3', 'menu': 'extra text 3', 'kind': 'W', },
+            \]}
+    endfunc
+    set completeopt=menu
+    set completefunc=CompleteFunc
+    hi PmenuKind      ctermfg=1 ctermbg=225
+    hi PmenuKindSel   ctermfg=1 ctermbg=7
+    hi PmenuExtra     ctermfg=243 ctermbg=225
+    hi PmenuExtraSel  ctermfg=0 ctermbg=7
+  END
+  call writefile(lines, 'Xscript', 'D')
+  let buf = RunVimInTerminal('-S Xscript', {})
+  call TermWait(buf)
+  call term_sendkeys(buf, "iaw\<C-X>\<C-u>")
+  call TermWait(buf, 50)
+  call VerifyScreenDump(buf, 'Test_pum_highlights_02', {})
+  call term_sendkeys(buf, "\<C-E>\<Esc>u")
+  call TermWait(buf)
   call StopVimInTerminal(buf)
 endfunc
 

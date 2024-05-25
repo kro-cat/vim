@@ -1,6 +1,7 @@
 " Tests for put commands, e.g. ":put", "p", "gp", "P", "gP", etc.
 
 source check.vim
+source screendump.vim
 
 func Test_put_block()
   new
@@ -9,6 +10,16 @@ func Test_put_block()
   call feedkeys("gg0p", 'x')
   call assert_equal("\u2500x", getline(1))
   bwipe!
+endfunc
+
+func Test_put_block_unicode()
+  new
+  call setreg('a', "À\nÀÀ\naaaaaaaaaaaa", "\<C-V>")
+  call setline(1, [' 1', ' 2', ' 3'])
+  exe "norm! \<C-V>jj\"ap"
+  let expected = ['À           1', 'ÀÀ          2', 'aaaaaaaaaaaa3']
+  call assert_equal(expected, getline(1, 3))
+  bw!
 endfunc
 
 func Test_put_char_block()
@@ -231,5 +242,98 @@ func Test_put_visual_mode()
   set selection&
 endfunc
 
+func Test_put_visual_block_mode()
+  enew
+  exe "norm 0R\<CR>\<C-C>V"
+  sil exe "norm \<C-V>c	\<MiddleDrag>"
+  set ve=all
+  sil norm vz=p
+
+  bwipe!
+  set ve=
+endfunc
+
+func Test_put_other_window()
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+      40vsplit
+      0put ='some text at the top'
+      put ='  one more text'
+      put ='  two more text'
+      put ='  three more text'
+      put ='  four more text'
+  END
+  call writefile(lines, 'Xtest_put_other', 'D')
+  let buf = RunVimInTerminal('-S Xtest_put_other', #{rows: 10})
+
+  call VerifyScreenDump(buf, 'Test_put_other_window_1', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_put_in_last_displayed_line()
+  CheckRunVimInTerminal
+
+  let lines =<< trim END
+      vim9script
+      autocmd CursorMoved * eval line('w$')
+      @a = 'x'->repeat(&columns * 2 - 2)
+      range(&lines)->setline(1)
+      feedkeys('G"ap')
+  END
+  call writefile(lines, 'Xtest_put_last_line', 'D')
+  let buf = RunVimInTerminal('-S Xtest_put_last_line', #{rows: 10})
+
+  call VerifyScreenDump(buf, 'Test_put_in_last_displayed_line_1', {})
+
+  call StopVimInTerminal(buf)
+endfunc
+
+func Test_put_visual_replace_whole_fold()
+  new
+  let lines = repeat(['{{{1', 'foo', 'bar', ''], 2)
+  call setline(1, lines)
+  setlocal foldmethod=marker
+  call setreg('"', 'baz')
+  call setreg('1', '')
+  normal! Vp
+  call assert_equal("{{{1\nfoo\nbar\n\n", getreg('1'))
+  call assert_equal(['baz', '{{{1', 'foo', 'bar', ''], getline(1, '$'))
+
+  bwipe!
+endfunc
+
+func Test_put_visual_replace_fold_marker()
+  new
+  let lines = repeat(['{{{1', 'foo', 'bar', ''], 4)
+  call setline(1, lines)
+  setlocal foldmethod=marker
+  normal! Gkzo
+  call setreg('"', '{{{1')
+  call setreg('1', '')
+  normal! Vp
+  call assert_equal("{{{1\n", getreg('1'))
+  call assert_equal(lines, getline(1, '$'))
+
+  bwipe!
+endfunc
+
+func Test_put_dict()
+  new
+  let d = #{a: #{b: 'abc'}, c: [1, 2], d: 0z10}
+  put! =d
+  call assert_equal(["{'a': {'b': 'abc'}, 'c': [1, 2], 'd': 0z10}", ''],
+        \ getline(1, '$'))
+  bw!
+endfunc
+
+func Test_put_list()
+  new
+  let l = ['a', 'b', 'c']
+  put! =l
+  call assert_equal(['a', 'b', 'c', ''], getline(1, '$'))
+  bw!
+endfunc
 
 " vim: shiftwidth=2 sts=2 expandtab

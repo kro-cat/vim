@@ -40,11 +40,13 @@ TEST_VIM9 = \
 	test_vim9_class \
 	test_vim9_cmd \
 	test_vim9_disassemble \
+	test_vim9_enum \
 	test_vim9_expr \
 	test_vim9_fails \
 	test_vim9_func \
 	test_vim9_import \
-	test_vim9_script
+	test_vim9_script \
+	test_vim9_typealias
 
 TEST_VIM9_RES = \
 	test_vim9_assign.res \
@@ -52,11 +54,13 @@ TEST_VIM9_RES = \
 	test_vim9_class.res \
 	test_vim9_cmd.res \
 	test_vim9_disassemble.res \
+	test_vim9_enum.res \
 	test_vim9_expr.res \
 	test_vim9_fails.res \
 	test_vim9_func.res \
 	test_vim9_import.res \
-	test_vim9_script.res
+	test_vim9_script.res \
+	test_vim9_typealias.res
 
 # Benchmark scripts.
 SCRIPTS_BENCH = test_bench_regexp.res
@@ -97,6 +101,7 @@ NEW_TESTS = \
 	test_cmdline \
 	test_cmdmods \
 	test_cmdwin \
+	test_codestyle \
 	test_command_count \
 	test_comments \
 	test_comparators \
@@ -104,6 +109,7 @@ NEW_TESTS = \
 	test_conceal \
 	test_const \
 	test_cpoptions \
+	test_crash \
 	test_crypt \
 	test_cscope \
 	test_cursor_func \
@@ -149,6 +155,7 @@ NEW_TESTS = \
 	test_fnameescape \
 	test_fnamemodify \
 	test_fold \
+	test_format \
 	test_functions \
 	test_function_lists \
 	test_ga \
@@ -201,6 +208,7 @@ NEW_TESTS = \
 	test_matchadd_conceal \
 	test_matchadd_conceal_utf8 \
 	test_matchfuzzy \
+	test_matchparen \
 	test_memory_usage \
 	test_menu \
 	test_messages \
@@ -242,6 +250,7 @@ NEW_TESTS = \
 	test_regexp_utf8 \
 	test_registers \
 	test_reltime \
+	test_remote \
 	test_rename \
 	test_restricted \
 	test_retab \
@@ -269,6 +278,7 @@ NEW_TESTS = \
 	test_spell \
 	test_spell_utf8 \
 	test_spellfile \
+	test_spellrare \
 	test_startup \
 	test_startup_utf8 \
 	test_stat \
@@ -288,6 +298,7 @@ NEW_TESTS = \
 	test_taglist \
 	test_tcl \
 	test_termcodes \
+	test_termdebug \
 	test_termencoding \
 	test_terminal \
 	test_terminal2 \
@@ -317,9 +328,11 @@ NEW_TESTS = \
 	test_window_cmd \
 	test_window_id \
 	test_windows_home \
+	test_winfixbuf \
 	test_wnext \
 	test_wordcount \
 	test_writefile \
+	test_xdg \
 	test_xxd \
 	test_alot_latin \
 	test_alot_utf8 \
@@ -359,12 +372,14 @@ NEW_TESTS_RES = \
 	test_cmdline.res \
 	test_cmdmods.res \
 	test_cmdwin.res \
+	test_codestyle.res \
 	test_command_count.res \
 	test_comments.res \
 	test_comparators.res \
 	test_conceal.res \
 	test_const.res \
 	test_cpoptions.res \
+	test_crash.res \
 	test_crypt.res \
 	test_cscope.res \
 	test_cursor_func.res \
@@ -448,6 +463,7 @@ NEW_TESTS_RES = \
 	test_matchadd_conceal.res \
 	test_matchadd_conceal_utf8.res \
 	test_matchfuzzy.res \
+	test_matchparen.res \
 	test_memory_usage.res \
 	test_menu.res \
 	test_messages.res \
@@ -483,6 +499,7 @@ NEW_TESTS_RES = \
 	test_recover.res \
 	test_regex_char_classes.res \
 	test_registers.res \
+	test_remote.res \
 	test_rename.res \
 	test_restricted.res \
 	test_retab.res \
@@ -505,6 +522,7 @@ NEW_TESTS_RES = \
 	test_spell.res \
 	test_spell_utf8.res \
 	test_spellfile.res \
+	test_spellrare.res \
 	test_startup.res \
 	test_stat.res \
 	test_statusline.res \
@@ -520,6 +538,7 @@ NEW_TESTS_RES = \
 	test_taglist.res \
 	test_tcl.res \
 	test_termcodes.res \
+	test_termdebug.res \
 	test_termencoding.res \
 	test_terminal.res \
 	test_terminal2.res \
@@ -545,8 +564,10 @@ NEW_TESTS_RES = \
 	test_window_cmd.res \
 	test_window_id.res \
 	test_windows_home.res \
+	test_winfixbuf.res \
 	test_wordcount.res \
 	test_writefile.res \
+	test_xdg.res \
 	test_xxd.res \
 	test_alot_latin.res \
 	test_alot_utf8.res \

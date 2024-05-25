@@ -1,4 +1,4 @@
-*autocmd.txt*   For Vim version 9.0.  Last change: 2022 Dec 12
+*autocmd.txt*   For Vim version 9.1.  Last change: 2024 May 05
 
 
 		  VIM REFERENCE MANUAL    by Bram Moolenaar
@@ -64,7 +64,7 @@ Example in Vim9 script: >
 In legacy script: >
    call autocmd_add(#{replace: v:true,
 		    \ group: 'DemoGroup',
-   		    \ event: 'BufEnter',
+		    \ event: 'BufEnter',
 		    \ pattern: '*.txt',
 		    \ cmd: 'call DemoBufEnter()'
 		    \ })
@@ -340,6 +340,7 @@ Name			triggered by ~
 |GUIEnter|		after starting the GUI successfully
 |GUIFailed|		after starting the GUI failed
 |TermResponse|		after the terminal response to |t_RV| is received
+|TermResponseAll|	after the terminal response to |t_RV| and others is received
 
 |QuitPre|		when using `:quit`, before deciding whether to exit
 |ExitPre|		when using a command that may make Vim exit
@@ -380,6 +381,7 @@ Name			triggered by ~
 |CursorMoved|		the cursor was moved in Normal mode
 |CursorMovedI|		the cursor was moved in Insert mode
 
+|WinNewPre|		before creating a new window
 |WinNew|		after creating a new window
 |TabNew|		after creating a new tab page
 |WinClosed|		after closing a window
@@ -398,7 +400,7 @@ Name			triggered by ~
 |InsertEnter|		starting Insert mode
 |InsertChange|		when typing <Insert> while in Insert or Replace mode
 |InsertLeave|		when leaving Insert mode
-|InsertLeavePre| 	just before leaving Insert mode
+|InsertLeavePre|	just before leaving Insert mode
 |InsertCharPre|		when a character was typed in Insert mode, before
 			inserting it
 
@@ -425,6 +427,9 @@ Name			triggered by ~
 |QuickFixCmdPost|	after a quickfix command is run
 
 |SessionLoadPost|	after loading a session file
+
+|SessionWritePost|	after writing the session file using
+			the |:mksession| command
 
 |MenuPopup|		just before showing the popup menu
 |CompleteChanged|	after Insert mode completion menu changed
@@ -611,9 +616,11 @@ CmdlineEnter			After moving the cursor to the command line,
 				where the user can type a command or search
 				string; including non-interactive use of ":"
 				in a mapping, but not when using |<Cmd>|.
+				The pattern is matched against the character
+				representing the type of command-line.
+				|cmdwin-char|
 				<afile> is set to a single character,
 				indicating the type of command-line.
-				|cmdwin-char|
 							*CmdlineLeave*
 CmdlineLeave			Before leaving the command line; including
 				non-interactive use of ":" in a mapping, but
@@ -1015,6 +1022,9 @@ OptionSet			After setting an option.  The pattern is
 				the option. Similarly |v:option_oldglobal| is
 				only set when |:set| or |:setglobal| was used.
 
+				This does not set |<abuf>|, you could use
+				|bufnr()|.
+
 				Note that when setting a |global-local| string
 				option with |:set|, then |v:option_old| is the
 				old global value. However, for all other kinds
@@ -1092,7 +1102,7 @@ SafeState			When nothing is pending, going to wait for the
 				- Command line completion is active
 				You can use `mode()` to find out what state
 				Vim is in.  That may be:
-				- VIsual mode
+				- Visual mode
 				- Normal mode
 				- Insert mode
 				- Command-line mode
@@ -1107,6 +1117,9 @@ SafeStateAgain			Like SafeState but after processing any
 
 							*SessionLoadPost*
 SessionLoadPost			After loading the session file created using
+				the |:mksession| command.
+							*SessionWritePost*
+SessionWritePost		After writing a session file by calling
 				the |:mksession| command.
 							*ShellCmdPost*
 ShellCmdPost			After executing a shell command with |:!cmd|,
@@ -1215,6 +1228,24 @@ TermResponse			After the response to |t_RV| is received from
 				triggered halfway executing another event,
 				especially if file I/O, a shell command or
 				anything else that takes time is involved.
+							*TermResponseAll*
+TermResponseAll			After the response to |t_RV|, |t_RC|, |t_RS|,
+				|t_RB|, |t_RF|, or |t_u7| are received from
+				the terminal.  The value of |v:termresponse|,
+				|v:termblinkresp|, |v:termstyleresp|,
+				|v:termrbgresp|, |v:termrfgresp|, and
+				|v:termu7resp|, correspondingly, can be used.
+				<amatch> will be set to any of:
+				    "version",
+				    "cursorblink",
+				    "cursorshape",
+				    "background",
+				    "foreground",
+				    "ambiguouswidth"
+				Note that this event may be triggered halfway
+				executing another event, especially if file I/O,
+				a shell command or anything else that takes time
+				is involved.
 							*TextChanged*
 TextChanged			After a change was made to the text in the
 				current buffer in Normal mode.  That is after
@@ -1365,6 +1396,18 @@ WinLeave			Before leaving a window.  If the window to be
 				executes the BufLeave autocommands before the
 				WinLeave autocommands (but not for ":new").
 				Not used for ":qa" or ":q" when exiting Vim.
+
+							*WinNewPre*
+WinNewPre			Before creating a new window. Triggered
+				before commands that modify window layout by
+				creating a split or new tab page. Not done for
+				the first window, when Vim has just started.
+				It is not allowed to modify window layout
+				while executing commands for the WinNewPre
+				event.
+				Most useful to store current window layout
+				and compare it with the new layout after the
+				Window has been created.
 
 							*WinNew*
 WinNew				When a new window was created.  Not done for

@@ -43,8 +43,8 @@ static buffheader_T recordbuff = {{NULL, {NUL}}, NULL, 0, 0};
 static int typeahead_char = 0;		// typeahead char that's not flushed
 
 /*
- * when block_redo is TRUE redo buffer will not be changed
- * used by edit() to repeat insertions and 'V' command for redoing
+ * When block_redo is TRUE the redo buffer will not be changed.
+ * Used by edit() to repeat insertions.
  */
 static int	block_redo = FALSE;
 
@@ -81,7 +81,7 @@ static int	KeyNoremap = 0;	    // remapping flags
 static char_u	typebuf_init[TYPELEN_INIT];	// initial typebuf.tb_buf
 static char_u	noremapbuf_init[TYPELEN_INIT];	// initial typebuf.tb_noremap
 
-static int	last_recorded_len = 0;	// number of last recorded chars
+static size_t	last_recorded_len = 0;	// number of last recorded chars
 
 #ifdef FEAT_EVAL
 mapblock_T	*last_used_map = NULL;
@@ -133,7 +133,7 @@ get_buffcont(
     for (bp = buffer->bh_first.b_next; bp != NULL; bp = bp->b_next)
 	count += (long_u)STRLEN(bp->b_str);
 
-    if ((count || dozero) && (p = alloc(count + 1)) != NULL)
+    if ((count > 0 || dozero) && (p = alloc(count + 1)) != NULL)
     {
 	p2 = p;
 	for (bp = buffer->bh_first.b_next; bp != NULL; bp = bp->b_next)
@@ -141,7 +141,7 @@ get_buffcont(
 		*p2++ = *str++;
 	*p2 = NUL;
     }
-    return (p);
+    return p;
 }
 
 /*
@@ -163,7 +163,7 @@ get_recorded(void)
      * (possibly mapped) characters that stopped the recording.
      */
     len = STRLEN(p);
-    if ((int)len >= last_recorded_len)
+    if (len >= last_recorded_len)
     {
 	len -= last_recorded_len;
 	p[len] = NUL;
@@ -214,7 +214,7 @@ add_buff(
     }
     else if (buf->bh_curr == NULL)	// buffer has already been read
     {
-	iemsg(_(e_add_to_internal_buffer_that_was_already_read_from));
+	iemsg(e_add_to_internal_buffer_that_was_already_read_from);
 	return;
     }
     else if (buf->bh_index != 0)
@@ -603,6 +603,29 @@ AppendToRedobuffLit(
 }
 
 /*
+ * Append "s" to the redo buffer, leaving 3-byte special key codes unmodified
+ * and escaping other K_SPECIAL and CSI bytes.
+ */
+    void
+AppendToRedobuffSpec(char_u *s)
+{
+    if (block_redo)
+	return;
+
+    while (*s != NUL)
+    {
+	if (*s == K_SPECIAL && s[1] != NUL && s[2] != NUL)
+	{
+	    // Insert special key literally.
+	    add_buff(&redobuff, s, 3L);
+	    s += 3;
+	}
+	else
+	    add_char_buff(&redobuff, mb_cptr2char_adv(&s));
+    }
+}
+
+/*
  * Append a character to the redo buffer.
  * Translates special keys, NUL, CSI, K_SPECIAL and multibyte characters.
  */
@@ -847,7 +870,7 @@ start_redo(long count, int old_redo)
 	{
 	    c = read_redo(FALSE, old_redo);
 	    add_char_buff(&readbuf2, c);
-	    if (!isdigit(c))
+	    if (!SAFE_isdigit(c))
 		break;
 	}
 	c = read_redo(FALSE, old_redo);
@@ -1259,50 +1282,104 @@ del_typebuf(int len, int offset)
 }
 
 /*
+ * State for adding bytes to a recording or 'showcmd'.
+ */
+typedef struct
+{
+    char_u	buf[MB_MAXBYTES * 3 + 4];
+    int		prev_c;
+    size_t	buflen;
+    unsigned	pending_special;
+    unsigned	pending_mbyte;
+} gotchars_state_T;
+
+/*
+ * Add a single byte to a recording or 'showcmd'.
+ * Return TRUE if a full key has been received, FALSE otherwise.
+ */
+    static int
+gotchars_add_byte(gotchars_state_T *state, char_u byte)
+{
+    int		c = state->buf[state->buflen++] = byte;
+    int		retval = FALSE;
+    int		in_special = state->pending_special > 0;
+    int		in_mbyte = state->pending_mbyte > 0;
+
+    if (in_special)
+	state->pending_special--;
+    else if (c == K_SPECIAL
+#ifdef FEAT_GUI
+		|| c == CSI
+#endif
+	    )
+	// When receiving a special key sequence, store it until we have all
+	// the bytes and we can decide what to do with it.
+	state->pending_special = 2;
+
+    if (state->pending_special > 0)
+	goto ret_false;
+
+    if (in_mbyte)
+	state->pending_mbyte--;
+    else
+    {
+	if (in_special)
+	{
+	    if (state->prev_c == KS_MODIFIER)
+		// When receiving a modifier, wait for the modified key.
+		goto ret_false;
+	    c = TO_SPECIAL(state->prev_c, c);
+	    if (c == K_FOCUSGAINED || c == K_FOCUSLOST)
+		// Drop K_FOCUSGAINED and K_FOCUSLOST, they are not useful
+		// in a recording.
+		state->buflen = 0;
+	}
+	// When receiving a multibyte character, store it until we have all
+	// the bytes, so that it won't be split between two buffer blocks,
+	// and delete_buff_tail() will work properly.
+	state->pending_mbyte = MB_BYTE2LEN_CHECK(c) - 1;
+    }
+
+    if (state->pending_mbyte > 0)
+	goto ret_false;
+
+    retval = TRUE;
+ret_false:
+    state->prev_c = c;
+    return retval;
+}
+
+/*
  * Write typed characters to script file.
- * If recording is on put the character in the recordbuffer.
+ * If recording is on put the character in the record buffer.
  */
     static void
 gotchars(char_u *chars, int len)
 {
     char_u		*s = chars;
-    int			i;
-    static char_u	buf[4];
-    static int		buflen = 0;
+    size_t		i;
     int			todo = len;
+    static gotchars_state_T state;
 
-    while (todo--)
+    while (todo-- > 0)
     {
-	buf[buflen++] = *s++;
-
-	// When receiving a special key sequence, store it until we have all
-	// the bytes and we can decide what to do with it.
-	if (buflen == 1 && buf[0] == K_SPECIAL)
+	if (!gotchars_add_byte(&state, *s++))
 	    continue;
-	if (buflen == 2)
-	    continue;
-	if (buflen == 3 && buf[1] == KS_EXTRA
-		       && (buf[2] == KE_FOCUSGAINED || buf[2] == KE_FOCUSLOST))
-	{
-	    // Drop K_FOCUSGAINED and K_FOCUSLOST, they are not useful in a
-	    // recording.
-	    buflen = 0;
-	    continue;
-	}
 
 	// Handle one byte at a time; no translation to be done.
-	for (i = 0; i < buflen; ++i)
-	    updatescript(buf[i]);
+	for (i = 0; i < state.buflen; ++i)
+	    updatescript(state.buf[i]);
 
 	if (reg_recording != 0)
 	{
-	    buf[buflen] = NUL;
-	    add_buff(&recordbuff, buf, (long)buflen);
+	    state.buf[state.buflen] = NUL;
+	    add_buff(&recordbuff, state.buf, (long)state.buflen);
 	    // remember how many chars were last recorded
-	    last_recorded_len += buflen;
+	    last_recorded_len += state.buflen;
 	}
-	buflen = 0;
+	state.buflen = 0;
     }
+
     may_sync_undo();
 
 #ifdef FEAT_EVAL
@@ -1313,6 +1390,16 @@ gotchars(char_u *chars, int len)
     // Since characters have been typed, consider the following to be in
     // another mapping.  Search string will be kept in history.
     ++maptick;
+}
+
+/*
+ * Record an <Ignore> key.
+ */
+    void
+gotchars_ignore(void)
+{
+    char_u nop_buf[3] = { K_SPECIAL, KS_EXTRA, KE_IGNORE };
+    gotchars(nop_buf, 3);
 }
 
 /*
@@ -1622,14 +1709,15 @@ updatescript(int c)
 }
 
 /*
- * Convert "c" plus "modifiers" to merge the effect of modifyOtherKeys into the
- * character.
+ * Convert "c_arg" plus "modifiers" to merge the effect of modifyOtherKeys into
+ * the character.  Also for when the Kitty key protocol is used.
  */
     int
 merge_modifyOtherKeys(int c_arg, int *modifiers)
 {
     int c = c_arg;
 
+    // CTRL only uses the lower 5 bits of the character.
     if (*modifiers & MOD_MASK_CTRL)
     {
 	if ((c >= '`' && c <= 0x7f) || (c >= '@' && c <= '_'))
@@ -1658,13 +1746,85 @@ merge_modifyOtherKeys(int c_arg, int *modifiers)
 	if (c != c_arg)
 	    *modifiers &= ~MOD_MASK_CTRL;
     }
+
+    // Alt/Meta sets the 8th bit of the character.
     if ((*modifiers & (MOD_MASK_META | MOD_MASK_ALT))
 	    && c >= 0 && c <= 127)
     {
+	// Some terminals (esp. Kitty) do not include Shift in the character.
+	// Apply it here to get consistency across terminals.  Only do ASCII
+	// letters, for other characters it depends on the keyboard layout.
+	if ((*modifiers & MOD_MASK_SHIFT) && c >= 'a' && c <= 'z')
+	{
+	    c += 'a' - 'A';
+	    *modifiers &= ~MOD_MASK_SHIFT;
+	}
 	c += 0x80;
-	*modifiers &= ~(MOD_MASK_META|MOD_MASK_ALT);
+	*modifiers &= ~(MOD_MASK_META | MOD_MASK_ALT);
     }
+
     return c;
+}
+
+/*
+ * Add a single byte to 'showcmd' for a partially matched mapping.
+ * Call add_to_showcmd() if a full key has been received.
+ */
+    static void
+add_byte_to_showcmd(char_u byte)
+{
+    static gotchars_state_T state;
+    char_u	*ptr;
+    int		modifiers = 0;
+    int		c = NUL;
+
+    if (!p_sc || msg_silent != 0)
+	return;
+
+    if (!gotchars_add_byte(&state, byte))
+	return;
+
+    state.buf[state.buflen] = NUL;
+    state.buflen = 0;
+
+    ptr = state.buf;
+    if (ptr[0] == K_SPECIAL && ptr[1] == KS_MODIFIER && ptr[2] != NUL)
+    {
+	modifiers = ptr[2];
+	ptr += 3;
+    }
+
+    if (*ptr != NUL)
+    {
+	char_u		*mb_ptr = mb_unescape(&ptr);
+
+	c = mb_ptr != NULL ? (*mb_ptr2char)(mb_ptr) : *ptr++;
+	if (c <= 0x7f)
+	{
+	    // Merge modifiers into the key to make the result more readable.
+	    int		modifiers_after = modifiers;
+	    int		mod_c = merge_modifyOtherKeys(c, &modifiers_after);
+
+	    if (modifiers_after == 0)
+	    {
+		modifiers = 0;
+		c = mod_c;
+	    }
+	}
+    }
+
+    // TODO: is there a more readable and yet compact representation of
+    // modifiers and special keys?
+    if (modifiers != 0)
+    {
+	add_to_showcmd(K_SPECIAL);
+	add_to_showcmd(KS_MODIFIER);
+	add_to_showcmd(modifiers);
+    }
+    if (c != NUL)
+	add_to_showcmd(c);
+    while (*ptr != NUL)
+	add_to_showcmd(*ptr++);
 }
 
 /*
@@ -1706,7 +1866,7 @@ vgetc(void)
     else
     {
 	// number of characters recorded from the last vgetc() call
-	static int	last_vgetc_recorded_len = 0;
+	static size_t	last_vgetc_recorded_len = 0;
 
 	mod_mask = 0;
 	vgetc_mod_mask = 0;
@@ -1828,7 +1988,7 @@ vgetc(void)
 
 		    // Handle <SID>{sid};  Do up to 20 digits for safety.
 		    last_used_sid = 0;
-		    for (j = 0; j < 20 && isdigit(c = vgetorpeek(TRUE)); ++j)
+		    for (j = 0; j < 20 && SAFE_isdigit(c = vgetorpeek(TRUE)); ++j)
 			last_used_sid = last_used_sid * 10 + (c - '0');
 		    last_used_map = NULL;
 		    continue;
@@ -2445,14 +2605,14 @@ check_simplify_modifier(int max_offset)
 		{
 		    if (put_string_in_typebuf(offset, 4, new_string, len,
 							NULL, 0, NULL) == FAIL)
-		    return -1;
+			return -1;
 		}
 		else
 		{
 		    tp[2] = modifier;
 		    if (put_string_in_typebuf(offset + 3, 1, new_string, len,
 							NULL, 0, NULL) == FAIL)
-		    return -1;
+			return -1;
 		}
 		return len;
 	    }
@@ -2466,7 +2626,7 @@ check_simplify_modifier(int max_offset)
  * modifyOtherKeys level 2 is enabled or the kitty keyboard protocol is
  * enabled.
  */
-    static int
+    int
 key_protocol_enabled(void)
 {
     // If xterm has responded to XTQMODKEYS it overrules seenModifyOtherKeys.
@@ -2763,9 +2923,9 @@ handle_mapping(
 	if (no_mapping == 0 || allow_keys != 0)
 	{
 	    if ((typebuf.tb_maplen == 0
-		    || (p_remap && typebuf.tb_noremap[
+			    || (p_remap && typebuf.tb_noremap[
 						    typebuf.tb_off] == RM_YES))
-		&& !*timedout)
+		    && !*timedout)
 		keylen = check_termcode(max_mlen + 1, NULL, 0, NULL);
 	    else
 		keylen = 0;
@@ -3107,7 +3267,7 @@ check_end_reg_executing(int advance)
     static int
 vgetorpeek(int advance)
 {
-    int		c, c1;
+    int		c;
     int		timedout = FALSE;	// waited for more than 'timeoutlen'
 					// for mapping to complete or
 					// 'ttimeoutlen' for complete key code
@@ -3247,7 +3407,7 @@ vgetorpeek(int advance)
  * get a character: 2. from the typeahead buffer
  */
 			c = typebuf.tb_buf[typebuf.tb_off];
-			if (advance)	// remove chars from tb_buf
+			if (advance)	// remove chars from typebuf
 			{
 			    cmd_silent = (typebuf.tb_silent > 0);
 			    if (typebuf.tb_maplen > 0)
@@ -3259,8 +3419,7 @@ vgetorpeek(int advance)
 				gotchars(typebuf.tb_buf
 						 + typebuf.tb_off, 1);
 			    }
-			    KeyNoremap = typebuf.tb_noremap[
-						      typebuf.tb_off];
+			    KeyNoremap = typebuf.tb_noremap[typebuf.tb_off];
 			    del_typebuf(1, 0);
 			}
 			break;  // got character, break the for loop
@@ -3328,15 +3487,15 @@ vgetorpeek(int advance)
 		    {
 			if (curwin->w_wcol > 0)
 			{
-			    if (did_ai)
+			    // After auto-indenting and no text is following,
+			    // we are expecting to truncate the trailing
+			    // white-space, so find the last non-white
+			    // character -- webb
+			    if (did_ai && *skipwhite(ml_get_curline()
+						+ curwin->w_cursor.col) == NUL)
 			    {
 				chartabsize_T cts;
 
-				/*
-				 * We are expecting to truncate the trailing
-				 * white-space, so find the last non-white
-				 * character -- webb
-				 */
 				curwin->w_wcol = 0;
 				ptr = ml_get_curline();
 				init_chartabsize_arg(&cts, curwin,
@@ -3474,7 +3633,7 @@ vgetorpeek(int advance)
 		 * to the user with showcmd.
 		 */
 		showcmd_idx = 0;
-		c1 = 0;
+		int showing_partial = FALSE;
 		if (typebuf.tb_len > 0 && advance && !exmode_active)
 		{
 		    if (((State & (MODE_NORMAL | MODE_INSERT))
@@ -3489,7 +3648,7 @@ vgetorpeek(int advance)
 			    edit_putchar(typebuf.tb_buf[typebuf.tb_off
 						+ typebuf.tb_len - 1], FALSE);
 			    setcursor(); // put cursor back where it belongs
-			    c1 = 1;
+			    showing_partial = TRUE;
 			}
 			// need to use the col and row from above here
 			old_wcol = curwin->w_wcol;
@@ -3500,14 +3659,16 @@ vgetorpeek(int advance)
 			if (typebuf.tb_len > SHOWCMD_COLS)
 			    showcmd_idx = typebuf.tb_len - SHOWCMD_COLS;
 			while (showcmd_idx < typebuf.tb_len)
-			    (void)add_to_showcmd(
+			    add_byte_to_showcmd(
 			       typebuf.tb_buf[typebuf.tb_off + showcmd_idx++]);
 			curwin->w_wcol = old_wcol;
 			curwin->w_wrow = old_wrow;
 		    }
 
-		    // this looks nice when typing a dead character map
+		    // This looks nice when typing a dead character map.
+		    // There is no actual command line for get_number().
 		    if ((State & MODE_CMDLINE)
+			    && get_cmdline_info()->cmdbuff != NULL
 #if defined(FEAT_CRYPT) || defined(FEAT_EVAL)
 			    && cmdline_star == 0
 #endif
@@ -3516,7 +3677,7 @@ vgetorpeek(int advance)
 		    {
 			putcmdline(typebuf.tb_buf[typebuf.tb_off
 						+ typebuf.tb_len - 1], FALSE);
-			c1 = 1;
+			showing_partial = TRUE;
 		    }
 		}
 
@@ -3550,11 +3711,12 @@ vgetorpeek(int advance)
 
 		if (showcmd_idx != 0)
 		    pop_showcmd();
-		if (c1 == 1)
+		if (showing_partial)
 		{
 		    if (State & MODE_INSERT)
 			edit_unputchar();
-		    if (State & MODE_CMDLINE)
+		    if ((State & MODE_CMDLINE)
+					&& get_cmdline_info()->cmdbuff != NULL)
 			unputcmdline();
 		    else
 			setcursor();	// put cursor back where it belongs
@@ -3619,14 +3781,9 @@ vgetorpeek(int advance)
 #endif
     if (timedout && c == ESC)
     {
-	char_u nop_buf[3];
-
-	// When recording there will be no timeout.  Add a <Nop> after the ESC
-	// to avoid that it forms a key code with following characters.
-	nop_buf[0] = K_SPECIAL;
-	nop_buf[1] = KS_EXTRA;
-	nop_buf[2] = KE_NOP;
-	gotchars(nop_buf, 3);
+	// When recording there will be no timeout.  Add an <Ignore> after the
+	// ESC to avoid that it forms a key code with following characters.
+	gotchars_ignore();
     }
 
     --vgetc_busy;
@@ -3890,7 +4047,7 @@ getcmdkeycmd(
     got_int = FALSE;
     while (c1 != NUL && !aborted)
     {
-	if (ga_grow(&line_ga, 32) != OK)
+	if (ga_grow(&line_ga, 32) == FAIL)
 	{
 	    aborted = TRUE;
 	    break;
@@ -3926,14 +4083,6 @@ getcmdkeycmd(
 	    if (c1 == K_ESC)
 		c1 = ESC;
 	}
-	if (c1 == Ctrl_V)
-	{
-	    // CTRL-V is followed by octal, hex or other characters, reverses
-	    // what AppendToRedobuffLit() does.
-	    ++no_reduce_keys;  //  don't merge modifyOtherKeys
-	    c1 = get_literal(TRUE);
-	    --no_reduce_keys;
-	}
 
 	if (got_int)
 	    aborted = TRUE;
@@ -3947,19 +4096,27 @@ getcmdkeycmd(
 	    emsg(_(e_cmd_mapping_must_end_with_cr_before_second_cmd));
 	    aborted = TRUE;
 	}
-	else if (IS_SPECIAL(c1))
+	else if (c1 == K_SNR)
 	{
-	    if (c1 == K_SNR)
-		ga_concat(&line_ga, (char_u *)"<SNR>");
-	    else
-	    {
-		semsg(e_cmd_mapping_must_not_include_str_key,
-					       get_special_key_name(c1, cmod));
-		aborted = TRUE;
-	    }
+	    ga_concat(&line_ga, (char_u *)"<SNR>");
 	}
 	else
-	    ga_append(&line_ga, c1);
+	{
+	    if (cmod != 0)
+	    {
+		ga_append(&line_ga, K_SPECIAL);
+		ga_append(&line_ga, KS_MODIFIER);
+		ga_append(&line_ga, cmod);
+	    }
+	    if (IS_SPECIAL(c1))
+	    {
+		ga_append(&line_ga, K_SPECIAL);
+		ga_append(&line_ga, K_SECOND(c1));
+		ga_append(&line_ga, K_THIRD(c1));
+	    }
+	    else
+		ga_append(&line_ga, c1);
+	}
 
 	cmod = 0;
     }
@@ -3974,23 +4131,30 @@ getcmdkeycmd(
 
 #if defined(FEAT_EVAL) || defined(PROTO)
 /*
- * If there was a mapping put info about it in the redo buffer, so that "."
- * will use the same script context.  We only need the SID.
+ * If there was a mapping we get its SID.  Otherwise, use "last_used_sid", it
+ * is set when redo'ing.
+ * Put this SID in the redo buffer, so that "." will use the same script
+ * context.
  */
     void
 may_add_last_used_map_to_redobuff(void)
 {
-    char_u buf[3 + 20];
+    char_u  buf[3 + 20];
+    int	    sid = -1;
 
-    if (last_used_map == NULL || last_used_map->m_script_ctx.sc_sid < 0)
+    if (last_used_map != NULL)
+	sid = last_used_map->m_script_ctx.sc_sid;
+    if (sid < 0)
+	sid = last_used_sid;
+
+    if (sid < 0)
 	return;
 
     // <K_SID>{nr};
     buf[0] = K_SPECIAL;
     buf[1] = KS_EXTRA;
     buf[2] = KE_SID;
-    vim_snprintf((char *)buf + 3, 20, "%d;",
-					   last_used_map->m_script_ctx.sc_sid);
+    vim_snprintf((char *)buf + 3, 20, "%d;", sid);
     add_buff(&redobuff, buf, -1L);
 }
 #endif
